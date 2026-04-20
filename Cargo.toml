@@ -40,7 +40,7 @@ tokio-rustls = "0.26"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 
 # Auth
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 pam = "0.8"
 
 # GStreamer
