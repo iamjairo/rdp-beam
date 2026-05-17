@@ -19,15 +19,27 @@ if ! command -v rustc &>/dev/null; then
 fi
 echo "  Rust: $(rustc --version)"
 
-# Check Node.js
+# Check Node.js. Vite 8 / Rolldown needs Node 20.12+ (uses node:util.styleText).
+# Ubuntu 24.04's `apt install nodejs` ships Node 18 which won't work — point
+# the user at NodeSource instead.
 if ! command -v node &>/dev/null; then
-    err "Node.js not found. Install it: sudo apt install nodejs npm"
+    err "Node.js not found. Install Node 22 LTS:"
+    err "    curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash -"
+    err "    sudo apt install -y nodejs"
     ISSUES=$((ISSUES + 1))
 else
-    echo "  Node: $(node --version)"
+    NODE_VER=$(node --version)
+    echo "  Node: $NODE_VER"
+    NODE_MAJOR=$(node -p "process.versions.node.split('.')[0]")
+    if [ "${NODE_MAJOR:-0}" -lt 20 ]; then
+        err "Node $NODE_VER is too old. Vite 8 / Rolldown needs Node 20.12+."
+        err "    curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash -"
+        err "    sudo apt install -y nodejs"
+        ISSUES=$((ISSUES + 1))
+    fi
 fi
 
-# Check system libraries
+# Check system libraries (default Xorg backend deps)
 MISSING=()
 for lib in gstreamer-1.0 xcb-shm xcb-randr xcb-xfixes libpulse libpulse-simple pam opus; do
     if ! pkg-config --exists "$lib" 2>/dev/null; then
@@ -40,11 +52,28 @@ if ! dpkg -s libclang-dev >/dev/null 2>&1; then
     MISSING+=("libclang-dev")
 fi
 
+# Wayland backend deps (only required when building with --features wayland).
+# We don't fail the script if these are missing — they're opt-in.
+WAYLAND_MISSING=()
+for lib in wayland-client wayland-protocols libpipewire-0.3; do
+    if ! pkg-config --exists "$lib" 2>/dev/null; then
+        WAYLAND_MISSING+=("$lib")
+    fi
+done
+if [ ${#WAYLAND_MISSING[@]} -gt 0 ]; then
+    log "Note: Wayland backend deps missing: ${WAYLAND_MISSING[*]}"
+    log "  Only needed for: cargo build --features wayland"
+    log "  Install on 26.04: sudo apt install libwayland-dev wayland-protocols libpipewire-0.3-dev"
+fi
+
 if [ ${#MISSING[@]} -gt 0 ]; then
     err "Missing packages: ${MISSING[*]}"
     err "Run: sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \\"
     err "    libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev \\"
     err "    libpulse-dev libpam0g-dev libopus-dev libclang-dev"
+    err ""
+    err "If you're not on Ubuntu/Debian, build inside a container:"
+    err "    make docker-check-2404    # or docker-check-2604"
     ISSUES=$((ISSUES + 1))
 fi
 

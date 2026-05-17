@@ -131,6 +131,136 @@ else
     warn "PulseAudio/PipeWire not found — audio streaming won't work"
 fi
 
+# --- Display backend ---
+# Reports what backend the config selects and whether the runtime for it is
+# actually present. Mirrors the resolve_backend logic in beam-server.
+echo ""
+printf "${bold}Display backend${reset}\n"
+
+# Read the configured value, default to "auto".
+configured_backend="auto"
+if [ -f /etc/beam/beam.toml ]; then
+    val=$(grep -oP '^\s*backend\s*=\s*"\K[^"]+' /etc/beam/beam.toml 2>/dev/null || echo "")
+    if [ -n "$val" ]; then
+        configured_backend="$val"
+    fi
+fi
+
+# Resolve "auto" the same way as beam-server.
+resolved_backend="$configured_backend"
+if [ "$configured_backend" = "auto" ] && [ -r /etc/os-release ]; then
+    osid=$(grep -oP '^ID=\K.*' /etc/os-release | tr -d '"')
+    osver=$(grep -oP '^VERSION_ID=\K.*' /etc/os-release | tr -d '"')
+    if [ "$osid" = "ubuntu" ]; then
+        # cut -d. -fN is already robust to point-release versions like
+        # "26.04.1" because we only take the first two components.
+        major=$(echo "$osver" | cut -d. -f1)
+        minor=$(echo "$osver" | cut -d. -f2)
+        # Guard against non-numeric values (cut emits the whole string when
+        # there's no dot, e.g. VERSION_ID="13").
+        case "$major" in
+            ''|*[!0-9]*) major=0 ;;
+        esac
+        case "$minor" in
+            ''|*[!0-9]*) minor=0 ;;
+        esac
+        if [ "$major" -gt 26 ] || { [ "$major" -eq 26 ] && [ "$minor" -ge 4 ]; }; then
+            resolved_backend="wayland"
+        else
+            resolved_backend="xorg"
+        fi
+    else
+        resolved_backend="xorg"
+    fi
+fi
+
+pass "Configured backend: $configured_backend (resolved: $resolved_backend)"
+
+case "$resolved_backend" in
+    xorg)
+        if command -v Xorg >/dev/null 2>&1 || [ -x /usr/lib/xorg/Xorg ]; then
+            pass "Xorg server binary available"
+        else
+            warn "Xorg server not found — install xserver-xorg-core"
+        fi
+        ;;
+    wayland)
+        if command -v cage >/dev/null 2>&1 || command -v sway >/dev/null 2>&1; then
+            pass "Headless wlroots compositor (cage or sway) available"
+        else
+            warn "No wlroots compositor found — install: sudo apt install cage"
+        fi
+        if pkg-config --exists libpipewire-0.3 2>/dev/null \
+            || [ -e /usr/lib/x86_64-linux-gnu/libpipewire-0.3.so* ] 2>/dev/null; then
+            pass "PipeWire runtime present"
+        else
+            warn "PipeWire runtime not found — install: sudo apt install pipewire wireplumber"
+        fi
+
+        # --- Wayland-specific runtime probes ---
+
+        # xdg-desktop-portal-wlr binary (bridges wlr-screencopy -> PipeWire ScreenCast)
+        if [ -x /usr/libexec/xdg-desktop-portal-wlr ] \
+            || [ -x /usr/lib/xdg-desktop-portal-wlr ]; then
+            pass "xdg-desktop-portal-wlr binary found"
+        else
+            warn "xdg-desktop-portal-wlr not found — install: sudo apt install xdg-desktop-portal-wlr"
+        fi
+
+        # wayland-info (needed for wlr-virtual-pointer-v1 protocol check via cage)
+        if command -v wayland-info >/dev/null 2>&1; then
+            pass "wayland-info installed (wayland-utils)"
+        else
+            warn "wayland-info not found — install: sudo apt install wayland-utils"
+        fi
+
+        # pipewiresrc GStreamer element (in gstreamer1.0-pipewire); required for capture
+        if gst-inspect-1.0 pipewiresrc >/dev/null 2>&1; then
+            pass "pipewiresrc GStreamer element available"
+        else
+            fail "pipewiresrc not found — Wayland capture won't work; install: sudo apt install gstreamer1.0-pipewire"
+        fi
+
+        # XDG_RUNTIME_DIR writable (PulseAudio, PipeWire, and Wayland sockets all land here)
+        xdg_dir="${XDG_RUNTIME_DIR:-}"
+        if [ -z "$xdg_dir" ]; then
+            warn "XDG_RUNTIME_DIR is not set — Wayland/PipeWire socket directory unknown"
+        elif [ -w "$xdg_dir" ]; then
+            pass "XDG_RUNTIME_DIR ($xdg_dir) is writable"
+        else
+            fail "XDG_RUNTIME_DIR ($xdg_dir) is not writable by current user"
+        fi
+
+        # Orphaned Beam Wayland sessions: /tmp/beam-xdg-* dirs with no live compositor
+        orphan_count=0
+        for beam_xdg_dir in /tmp/beam-xdg-* 2>/dev/null; do
+            [ -d "$beam_xdg_dir" ] || continue
+            # The compositor socket is "wayland-*" inside XDG_RUNTIME_DIR.
+            # We detect live sessions by checking whether any process has the
+            # directory open (lsof / fuser); fall back to checking for a
+            # wayland socket file as a best-effort proxy.
+            if command -v fuser >/dev/null 2>&1; then
+                if ! fuser "$beam_xdg_dir" >/dev/null 2>&1; then
+                    warn "Orphaned Beam Wayland session dir (no live compositor): $beam_xdg_dir"
+                    orphan_count=$((orphan_count+1))
+                fi
+            else
+                # No fuser: flag dirs that have no wayland socket (compositor gone)
+                if ! ls "$beam_xdg_dir"/wayland-* >/dev/null 2>&1; then
+                    warn "Possible orphaned Beam Wayland session dir: $beam_xdg_dir"
+                    orphan_count=$((orphan_count+1))
+                fi
+            fi
+        done
+        if [ "$orphan_count" -eq 0 ]; then
+            pass "No orphaned Beam Wayland session dirs in /tmp"
+        fi
+
+        warn "backend = \"wayland\" runtime path is not yet implemented in beam-agent"
+        warn "  Set [session] backend = \"xorg\" in /etc/beam/beam.toml as a workaround"
+        ;;
+esac
+
 # --- Service ---
 echo ""
 printf "${bold}Service${reset}\n"

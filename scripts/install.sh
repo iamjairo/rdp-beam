@@ -29,6 +29,28 @@ fi
 ARCH=$(uname -m)
 log "Architecture: $ARCH"
 
+# Detect distro + version to choose the right dependency set.
+# 26.04 ships PipeWire by default and is Wayland-only on the desktop session,
+# so we install the Wayland backend's runtime there. 24.04 keeps the
+# Xorg/PulseAudio stack as before.
+OS_ID=""
+OS_VERSION=""
+if [ -r /etc/os-release ]; then
+    . /etc/os-release
+    OS_ID="${ID:-}"
+    OS_VERSION="${VERSION_ID:-}"
+fi
+log "Distro: ${OS_ID:-unknown} ${OS_VERSION:-unknown}"
+
+# Returns 0 if running on Ubuntu 26.04 or newer.
+is_ubuntu_2604_plus() {
+    [ "$OS_ID" = "ubuntu" ] || return 1
+    case "$OS_VERSION" in
+        26.04|26.10|27.*|28.*|29.*|3*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # Detect GPU
 detect_gpu() {
     if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
@@ -48,18 +70,58 @@ log "GPU: $GPU"
 # Install system dependencies
 log "Installing system dependencies..."
 apt-get update -qq
-apt-get install -y -qq \
-    build-essential pkg-config cmake \
-    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-    gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-    gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
-    libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev \
-    xserver-xorg-video-dummy \
-    libpulse-dev libopus-dev pulseaudio \
-    libpam0g-dev libclang-dev \
-    xfce4 xfce4-terminal xfce4-whiskermenu-plugin gnome-keyring \
-    unclutter-xfixes epiphany-browser \
-    nodejs npm
+
+# Common build deps + Xorg/PulseAudio runtime for the existing backend.
+COMMON_PKGS=(
+    build-essential pkg-config cmake curl gnupg
+    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+    gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+    gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
+    libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev
+    xserver-xorg-video-dummy
+    libpulse-dev libopus-dev
+    libpam0g-dev libclang-dev
+    xfce4 xfce4-terminal xfce4-whiskermenu-plugin gnome-keyring
+    unclutter-xfixes epiphany-browser
+)
+# Node.js: Ubuntu 24.04 ships Node 18, which Vite 8 / Rolldown won't run on
+# (needs node:util.styleText, Node 20.12+). Use NodeSource Node 22 LTS so
+# `npm run build` in web/ works regardless of the host's apt repo state.
+# Note: only needed at install time for source installs; the .deb shipping
+# from CI bundles a pre-built web/dist and doesn't need nodejs at runtime.
+
+# Pick an audio runtime: 26.04 uses PipeWire's pulse shim; older releases
+# stay on PulseAudio. Both expose a /tmp/.../native socket that beam-agent
+# can capture from, so the rest of the agent code is unaffected.
+if is_ubuntu_2604_plus; then
+    COMMON_PKGS+=(pipewire pipewire-pulse wireplumber)
+    log "Ubuntu 26.04+ detected: installing PipeWire (with pulse shim) instead of PulseAudio"
+else
+    COMMON_PKGS+=(pulseaudio)
+fi
+
+# Wayland backend runtime (headless wlroots compositor + portals) — only on
+# 26.04+ where users will actually want to enable backend = "wayland".
+# Currently advisory: the agent's wayland code path is not yet implemented,
+# but installing the runtime now means switching to backend=wayland later
+# is a config edit, not a fresh apt install.
+if is_ubuntu_2604_plus; then
+    COMMON_PKGS+=(cage xdg-desktop-portal-wlr)
+fi
+
+apt-get install -y -qq "${COMMON_PKGS[@]}"
+
+# Install Node 22 from NodeSource (after the base apt run so curl is present).
+# If a recent Node is already on the system, leave it alone.
+NODE_MAJOR=0
+if command -v node >/dev/null 2>&1; then
+    NODE_MAJOR=$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo "0")
+fi
+if [ "${NODE_MAJOR:-0}" -lt 20 ]; then
+    log "Installing Node.js 22 from NodeSource (current: ${NODE_MAJOR:-none})..."
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null 2>&1 || true
+    apt-get install -y -qq nodejs
+fi
 
 # GPU-specific packages
 case "$GPU" in

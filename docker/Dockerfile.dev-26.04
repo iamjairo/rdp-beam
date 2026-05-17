@@ -1,0 +1,47 @@
+# Ubuntu 26.04 builder image for Beam.
+# Use for: verifying the new backend = "wayland" path compiles, building
+# .deb packages for 26.04 hosts, regression testing GStreamer 1.26+ encoders.
+#
+# Usage from repo root:
+#   docker build -t beam-build-2604 -f docker/Dockerfile.dev-26.04 .
+#   docker run --rm -v "$PWD":/work -w /work beam-build-2604 make check
+#
+# NOTE: 26.04 has the same package names as 24.04 for most build deps
+# (libgstreamer1.0-dev, libxcb*-dev, libpam0g-dev). The new additions
+# here are PipeWire and wlroots/Wayland development headers.
+FROM ubuntu:26.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    CARGO_HOME=/cargo \
+    RUSTUP_HOME=/rustup \
+    PATH=/cargo/bin:/usr/local/bin:/usr/bin:/bin
+
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+        build-essential pkg-config cmake ca-certificates curl gnupg git \
+        libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+        gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+        gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
+        libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev \
+        libpulse-dev libopus-dev \
+        libpipewire-0.3-dev libspa-0.2-dev \
+        libwayland-dev wayland-protocols \
+        libpam0g-dev libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node 22 from NodeSource — same reasoning as Dockerfile.dev-24.04.
+# Even on 26.04 (which ships a newer apt nodejs) we pin to a known version
+# so the build matrix doesn't drift between 24.04 and 26.04 jobs.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain stable --profile minimal \
+    && /cargo/bin/rustup component add clippy rustfmt
+
+WORKDIR /work
+CMD ["bash"]
+
+# nfpm intentionally not installed in the dev image; see Dockerfile.dev-24.04.

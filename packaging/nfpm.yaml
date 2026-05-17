@@ -31,11 +31,20 @@ recommends:
   - xfce4
   - xfce4-whiskermenu-plugin
   - dbus-x11
-  - pulseaudio | pipewire-pulse
+  # Audio: pipewire-pulse is preferred on 26.04+; pulseaudio is still valid
+  # on 24.04. The agent only cares about the /tmp/.../native socket either
+  # provides, so either satisfies the runtime requirement.
+  - pipewire-pulse | pulseaudio
   - xclip
   - libcap2-bin
   - gnome-keyring
   - epiphany-browser
+  # Wayland backend runtime — installed but not required. Lets a user flip
+  # `[session] backend = "wayland"` in beam.toml without a fresh apt run
+  # once the agent's wayland code path lands.
+  - cage | sway
+  - wireplumber
+  - xdg-desktop-portal-wlr
 
 suggests:
   - gstreamer1.0-vaapi

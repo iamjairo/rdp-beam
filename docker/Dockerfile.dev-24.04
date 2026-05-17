@@ -1,0 +1,49 @@
+# Ubuntu 24.04 builder image for Beam.
+# Matches the existing supported target. Use for: regression testing,
+# verifying that nothing on the Xorg/PulseAudio path broke when adding
+# the new backend = "wayland" branch.
+#
+# Usage from repo root:
+#   docker build -t beam-build-2404 -f docker/Dockerfile.dev-24.04 .
+#   docker run --rm -v "$PWD":/work -w /work beam-build-2404 make check
+#
+# The image only contains build dependencies — no runtime services.
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    CARGO_HOME=/cargo \
+    RUSTUP_HOME=/rustup \
+    PATH=/cargo/bin:/usr/local/bin:/usr/bin:/bin
+
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+        build-essential pkg-config cmake ca-certificates curl gnupg git \
+        libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+        gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+        gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
+        libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev \
+        libpulse-dev libopus-dev \
+        libpam0g-dev libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node 22 from NodeSource — Ubuntu 24.04's packaged `nodejs` is too old for
+# Vite 8 / Rolldown (needs `node:util.styleText`, Node 20.12+). We pin
+# `22.x` here to match what CI uses; bump in lockstep with .github/workflows.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust toolchain matches the version we run on the NAS; keep in sync with rust-toolchain
+# if/when one is added. 1.85 covers edition 2024.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain stable --profile minimal \
+    && /cargo/bin/rustup component add clippy rustfmt
+
+WORKDIR /work
+CMD ["bash"]
+
+# nfpm is intentionally NOT installed here. It's only needed for `.deb`
+# packaging in the release workflow; the dev container's job is to run
+# `make check` and produce binaries. Add it back via a layered Dockerfile
+# (e.g. docker/Dockerfile.release-2404) when we need it.
