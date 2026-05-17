@@ -119,6 +119,52 @@ make release VERSION=X.Y.Z
 - `/etc/X11/beam-xorg.conf` — static Xorg config for dummy driver
 - `/var/lib/beam/sessions/` — runtime session data
 
+## Display Backend (Xorg / Wayland)
+
+Recorded: 2026-05-16. Driven by Ubuntu 26.04 being Wayland-only on the desktop
+session.
+
+### `backend` config field
+- `[session] backend` accepts `"auto"`, `"xorg"`, `"wayland"`. Defaults to `"auto"`.
+- `"auto"` is resolved server-side at startup (`crates/server/src/session.rs::resolve_backend`)
+  by reading `/etc/os-release`. Ubuntu 26.04+ → `wayland`, everything else → `xorg`.
+- The resolved value is pinned for the lifetime of the server process and passed
+  to every agent via `--backend`. Agents never re-detect.
+- The agent **also** resolves `auto` locally so manual `beam-agent` invocations
+  and integration tests stay self-contained. Both implementations must stay in
+  sync — there's a test in each crate that asserts the same osrelease produces
+  the same value.
+
+### Why a config field at all (rejected: feature-flag-only switch)
+- An end user upgrading their host from 24.04 → 26.04 should get a usable
+  default without recompiling. A pure Cargo feature would force per-distro builds.
+- The field also lets a 26.04 user pin `backend = "xorg"` while the Wayland
+  runtime path is being stabilised, without downgrading their OS.
+
+### Wayland runtime path: deferred
+- `crates/agent/src/wayland.rs` is a stub-only module behind `#[cfg(feature = "wayland")]`.
+- The agent's `main.rs` rejects `backend = "wayland"` with a clear error pointing
+  users at `backend = "xorg"` as the workaround.
+- Compositor choice when the runtime lands: `cage` (kiosk wlroots) first, with
+  `sway --backend=headless` as the heavier fallback. **Not GNOME-headless-shell** —
+  it requires session D-Bus and pulls in much of GNOME, defeating the point of a
+  per-session isolated display.
+- Capture path: PipeWire screencast via GStreamer `pipewiresrc` feeding the
+  existing H.264 encoder pipeline. No SDP/ICE/DTLS overhead — the binary frame
+  protocol is unchanged.
+- Input path: wlroots `wlr-virtual-keyboard-v1` + `wlr-virtual-pointer-v1`.
+  `libei` is the future but not yet stable on Ubuntu LTS.
+
+### Packaging implications
+- `scripts/install.sh` branches on `/etc/os-release` `VERSION_ID`. 26.04+ swaps
+  `pulseaudio` for `pipewire pipewire-pulse wireplumber` and adds `cage` +
+  `xdg-desktop-portal-wlr`.
+- `packaging/nfpm.yaml` `recommends` `pipewire-pulse | pulseaudio` plus the
+  Wayland-backend runtime — they're advisory, not required.
+- The Wayland Cargo deps (`wayland-client`, `wayland-protocols`,
+  `wayland-protocols-wlr`) are opt-in via `--features wayland`. Default builds
+  don't need `libwayland-dev` on the build host.
+
 ## Security Decisions
 
 Recorded: 2026-02-17. These are settled decisions — do not re-debate without a clear reason.

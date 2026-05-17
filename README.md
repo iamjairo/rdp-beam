@@ -24,7 +24,15 @@ Fully open source, GPU-accelerated, sub-30ms latency. Built for developers who w
 - **Performance overlay** — press F9 to see FPS, decode time, bitrate, and resolution
 - **120fps default** — smooth desktop experience at high frame rates
 
-## Install (Ubuntu 24.04+ / Debian 13+)
+## Install (Ubuntu 24.04 / 26.04 / Debian 13+)
+
+> **Ubuntu 26.04 note**: Beam now picks the right runtime stack automatically.
+> On 26.04 the installer uses `pipewire-pulse` instead of `pulseaudio` and
+> pre-installs `cage` + `xdg-desktop-portal-wlr` so a future switch to
+> `backend = "wayland"` is a config edit, not a fresh apt run. The default
+> backend on 26.04 stays `xorg` until the Wayland code path is fully wired
+> (see *Choosing a backend* below).
+
 
 ### APT Repository (Recommended)
 
@@ -122,6 +130,22 @@ sudo systemctl restart beam
 ```
 
 **Option C: Existing certificate** — set `tls_cert` and `tls_key` in `/etc/beam/beam.toml`.
+
+### Choosing a backend
+
+Beam supports two virtual-display backends, selected by `[session] backend`
+in `/etc/beam/beam.toml`:
+
+| Value | What runs | When to use |
+|---|---|---|
+| `"auto"` (default) | Resolves to `wayland` on Ubuntu 26.04+, `xorg` everywhere else | Recommended. Set-and-forget. |
+| `"xorg"` | `Xorg` with the `dummy` or `nvidia` driver | Stable, fastest path today. Required on any host without `cage`/`wlroots`. |
+| `"wayland"` | Headless wlroots compositor (`cage` or `sway --backend=headless`) + PipeWire screencast capture | Future-proof on 26.04+. **Not yet implemented in the agent runtime** — currently exits with a clear error on startup. The installer prepares the system for it so flipping the value is a one-line change later. |
+
+The auto-detection reads `/etc/os-release` once at server start. On Ubuntu
+26.04 with the `wayland` backend selected today, `beam-agent` will refuse
+to start and the doctor (`beam-doctor`) prints a warning telling you to
+override with `backend = "xorg"`.
 
 ### Keyboard Shortcuts
 

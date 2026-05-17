@@ -6,6 +6,7 @@ dist/
 *~
 .env
 .DS_Store
+@eaDir/
 web/dist/
 web/src/*.js
 
