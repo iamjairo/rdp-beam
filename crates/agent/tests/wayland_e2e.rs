@@ -53,11 +53,8 @@ const BITRATE: u32 = 1_000_000;
 fn spawn_cage() -> Result<Child, String> {
     std::fs::create_dir_all(XDG_RUNTIME_DIR)
         .map_err(|e| format!("Failed to create XDG_RUNTIME_DIR {XDG_RUNTIME_DIR}: {e}"))?;
-    std::fs::set_permissions(
-        XDG_RUNTIME_DIR,
-        std::fs::Permissions::from_mode(0o700),
-    )
-    .map_err(|e| format!("Failed to chmod XDG_RUNTIME_DIR: {e}"))?;
+    std::fs::set_permissions(XDG_RUNTIME_DIR, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("Failed to chmod XDG_RUNTIME_DIR: {e}"))?;
 
     Command::new("cage")
         .arg("--")
@@ -69,10 +66,12 @@ fn spawn_cage() -> Result<Child, String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| format!(
-            "STEP 1 FAILED -- compositor spawn: cage not found or spawn error: {e}\n\
+        .map_err(|e| {
+            format!(
+                "STEP 1 FAILED -- compositor spawn: cage not found or spawn error: {e}\n\
              Fix: apt-get install cage"
-        ))
+            )
+        })
 }
 
 /// Wait for cage's Wayland socket to appear in XDG_RUNTIME_DIR.
@@ -134,9 +133,7 @@ fn wayland_capture_e2e() {
             panic!("{msg}");
         }
     };
-    eprintln!(
-        "[wayland_e2e] STEP 1 OK: socket {XDG_RUNTIME_DIR}/{wayland_display} is ready"
-    );
+    eprintln!("[wayland_e2e] STEP 1 OK: socket {XDG_RUNTIME_DIR}/{wayland_display} is ready");
 
     eprintln!("[wayland_e2e] STEP 2: opening WaylandCapture (portal + pipewiresrc)");
     let capture = match WaylandCapture::new(

@@ -132,5 +132,4 @@ const browserFallback: BeamNative = {
  * + `contextBridge.exposeInMainWorld('__BEAM_NATIVE__', ...)`.
  */
 export const native: BeamNative =
-  (globalThis as unknown as { __BEAM_NATIVE__?: BeamNative }).__BEAM_NATIVE__ ??
-  browserFallback;
+  (globalThis as unknown as { __BEAM_NATIVE__?: BeamNative }).__BEAM_NATIVE__ ?? browserFallback;

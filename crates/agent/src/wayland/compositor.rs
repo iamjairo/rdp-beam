@@ -104,7 +104,10 @@ impl WaylandDisplay {
         // Create the private XDG_RUNTIME_DIR with strict perms. Wayland's
         // libwayland refuses to bind a socket in a world-writable directory.
         std::fs::create_dir_all(&xdg_runtime_dir).with_context(|| {
-            format!("failed to create XDG_RUNTIME_DIR {}", xdg_runtime_dir.display())
+            format!(
+                "failed to create XDG_RUNTIME_DIR {}",
+                xdg_runtime_dir.display()
+            )
         })?;
         #[cfg(unix)]
         {
@@ -142,11 +145,7 @@ impl WaylandDisplay {
             }
             "sway" => {
                 let mut c = Command::new("sway");
-                c.args([
-                    "--unsupported-gpu",
-                    "--config",
-                    "/dev/null",
-                ]);
+                c.args(["--unsupported-gpu", "--config", "/dev/null"]);
                 c.env("WLR_BACKENDS", "headless");
                 c.env("WLR_LIBINPUT_NO_DEVICES", "1");
                 c
@@ -320,8 +319,7 @@ impl Drop for WaylandDisplay {
                         if Instant::now() >= deadline {
                             warn!(
                                 child = name,
-                                display_num,
-                                "SIGTERM grace expired; sending SIGKILL"
+                                display_num, "SIGTERM grace expired; sending SIGKILL"
                             );
                             let _ = child.kill();
                             let _ = child.wait();

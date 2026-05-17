@@ -25,15 +25,18 @@
 
 use std::io::Write as _;
 use std::os::fd::AsFd as _;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
 use anyhow::Context;
 use tracing::{debug, info};
 use wayland_client::{
-    protocol::{wl_pointer::{Axis, ButtonState}, wl_registry, wl_seat},
     Connection, Dispatch, EventQueue, QueueHandle,
+    protocol::{
+        wl_pointer::{Axis, ButtonState},
+        wl_registry, wl_seat,
+    },
 };
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
     zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1,
@@ -64,7 +67,11 @@ struct WlState {
 
 impl WlState {
     fn new() -> Self {
-        Self { seat: None, vpm: None, vkm: None }
+        Self {
+            seat: None,
+            vpm: None,
+            vkm: None,
+        }
     }
 }
 
@@ -77,7 +84,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WlState {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        let wl_registry::Event::Global { name, interface, version } = event else {
+        let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        else {
             return;
         };
         match interface.as_str() {
@@ -97,44 +109,60 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WlState {
 
 impl Dispatch<wl_seat::WlSeat, ()> for WlState {
     fn event(
-        _: &mut Self, _: &wl_seat::WlSeat, _: wl_seat::Event,
-        _: &(), _: &Connection, _: &QueueHandle<Self>,
+        _: &mut Self,
+        _: &wl_seat::WlSeat,
+        _: wl_seat::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
     ) {
     }
 }
 
 impl Dispatch<ZwlrVirtualPointerManagerV1, ()> for WlState {
     fn event(
-        _: &mut Self, _: &ZwlrVirtualPointerManagerV1,
+        _: &mut Self,
+        _: &ZwlrVirtualPointerManagerV1,
         _: wayland_protocols_wlr::virtual_pointer::v1::client::zwlr_virtual_pointer_manager_v1::Event,
-        _: &(), _: &Connection, _: &QueueHandle<Self>,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
     ) {
     }
 }
 
 impl Dispatch<ZwpVirtualKeyboardManagerV1, ()> for WlState {
     fn event(
-        _: &mut Self, _: &ZwpVirtualKeyboardManagerV1,
+        _: &mut Self,
+        _: &ZwpVirtualKeyboardManagerV1,
         _: wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_manager_v1::Event,
-        _: &(), _: &Connection, _: &QueueHandle<Self>,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
     ) {
     }
 }
 
 impl Dispatch<ZwlrVirtualPointerV1, ()> for WlState {
     fn event(
-        _: &mut Self, _: &ZwlrVirtualPointerV1,
+        _: &mut Self,
+        _: &ZwlrVirtualPointerV1,
         _: wayland_protocols_wlr::virtual_pointer::v1::client::zwlr_virtual_pointer_v1::Event,
-        _: &(), _: &Connection, _: &QueueHandle<Self>,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
     ) {
     }
 }
 
 impl Dispatch<ZwpVirtualKeyboardV1, ()> for WlState {
     fn event(
-        _: &mut Self, _: &ZwpVirtualKeyboardV1,
+        _: &mut Self,
+        _: &ZwpVirtualKeyboardV1,
         _: wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_v1::Event,
-        _: &(), _: &Connection, _: &QueueHandle<Self>,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
     ) {
     }
 }
@@ -167,7 +195,9 @@ impl WaylandInput {
         // Override WAYLAND_DISPLAY so connect_to_env() picks up the right socket.
         // Safe: single-threaded at construction time; no concurrent env access.
         #[allow(deprecated)]
-        unsafe { std::env::set_var("WAYLAND_DISPLAY", wayland_display) };
+        unsafe {
+            std::env::set_var("WAYLAND_DISPLAY", wayland_display)
+        };
 
         let conn = Connection::connect_to_env()
             .with_context(|| format!("connect to Wayland display {wayland_display}"))?;
@@ -201,7 +231,9 @@ impl WaylandInput {
                 vkm.create_virtual_keyboard(seat, &qh, ()),
             )
         };
-        queue.roundtrip(&mut state).context("Wayland roundtrip (objects)")?;
+        queue
+            .roundtrip(&mut state)
+            .context("Wayland roundtrip (objects)")?;
 
         // Send the XKB keymap once at construction — compositor must receive
         // this before any key events.
@@ -212,9 +244,14 @@ impl WaylandInput {
         keyboard.keymap(WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, fd.as_fd(), keymap_bytes);
         // fd drops here, closing our copy; Wayland library dups before send.
 
-        queue.roundtrip(&mut state).context("Wayland roundtrip (keymap)")?;
+        queue
+            .roundtrip(&mut state)
+            .context("Wayland roundtrip (keymap)")?;
 
-        info!(display = wayland_display, keymap_bytes, "WaylandInput ready");
+        info!(
+            display = wayland_display,
+            keymap_bytes, "WaylandInput ready"
+        );
 
         Ok(Self {
             queue,
@@ -286,7 +323,11 @@ impl InputBackend for WaylandInput {
 
     fn inject_button(&mut self, button: u8, pressed: bool) -> anyhow::Result<()> {
         let btn = Self::map_button(button)?;
-        let state = if pressed { ButtonState::Pressed } else { ButtonState::Released };
+        let state = if pressed {
+            ButtonState::Pressed
+        } else {
+            ButtonState::Released
+        };
         let t = self.now_ms();
         self.pointer.button(t, btn, state);
         self.pointer.frame();
@@ -298,10 +339,12 @@ impl InputBackend for WaylandInput {
     fn inject_scroll(&mut self, dx: f64, dy: f64) -> anyhow::Result<()> {
         let t = self.now_ms();
         if dy.abs() > f64::EPSILON {
-            self.pointer.axis(t, Axis::VerticalScroll, dy * SCROLL_PX_PER_UNIT);
+            self.pointer
+                .axis(t, Axis::VerticalScroll, dy * SCROLL_PX_PER_UNIT);
         }
         if dx.abs() > f64::EPSILON {
-            self.pointer.axis(t, Axis::HorizontalScroll, dx * SCROLL_PX_PER_UNIT);
+            self.pointer
+                .axis(t, Axis::HorizontalScroll, dx * SCROLL_PX_PER_UNIT);
         }
         self.pointer.frame();
         debug!(dx, dy, t, "inject_scroll");
@@ -321,7 +364,9 @@ fn build_xkb_keymap_string() -> anyhow::Result<String> {
     use std::process::Command;
 
     if let Ok(display) = std::env::var("DISPLAY")
-        && let Ok(o) = Command::new("xkbcomp").args(["-xkb", &display, "-"]).output()
+        && let Ok(o) = Command::new("xkbcomp")
+            .args(["-xkb", &display, "-"])
+            .output()
         && o.status.success()
         && let Ok(s) = String::from_utf8(o.stdout)
         && !s.trim().is_empty()
@@ -334,7 +379,11 @@ fn build_xkb_keymap_string() -> anyhow::Result<String> {
     let variant = std::env::var("XKB_DEFAULT_VARIANT").unwrap_or_default();
     let options = std::env::var("XKB_DEFAULT_OPTIONS").unwrap_or_default();
 
-    let mut args = vec!["compile-keymap".to_string(), "--layout".to_string(), layout.clone()];
+    let mut args = vec![
+        "compile-keymap".to_string(),
+        "--layout".to_string(),
+        layout.clone(),
+    ];
     if !variant.is_empty() {
         args.extend(["--variant".into(), variant.clone()]);
     }
@@ -380,7 +429,13 @@ fn write_keymap_to_memfd(keymap: &str) -> anyhow::Result<std::os::unix::io::Owne
         use std::os::unix::io::FromRawFd as _;
         let name = std::ffi::CString::new("beam-keymap").expect("no interior NUL");
         // SAFETY: memfd_create is safe with a valid C string; fd is owned on success.
-        let fd = unsafe { libc::syscall(libc::SYS_memfd_create, name.as_ptr(), 1i64 /* MFD_CLOEXEC */) } as i32;
+        let fd = unsafe {
+            libc::syscall(
+                libc::SYS_memfd_create,
+                name.as_ptr(),
+                1i64, /* MFD_CLOEXEC */
+            )
+        } as i32;
         if fd < 0 {
             return Err(std::io::Error::last_os_error()).context("memfd_create");
         }
@@ -429,8 +484,8 @@ mod tests {
     #[test]
     fn x11_to_evdev() {
         assert_eq!((65u32).saturating_sub(8), 57); // space: X11=65 → evdev=57
-        assert_eq!((8u32).saturating_sub(8), 0);   // saturates at zero
-        assert_eq!((0u32).saturating_sub(8), 0);   // never negative
+        assert_eq!((8u32).saturating_sub(8), 0); // saturates at zero
+        assert_eq!((0u32).saturating_sub(8), 0); // never negative
     }
 
     #[test]

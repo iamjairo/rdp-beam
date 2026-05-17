@@ -1167,7 +1167,8 @@ async fn run_wayland_session(args: cli::Args) -> anyhow::Result<()> {
     let (encoded_tx, mut encoded_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(2);
     let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
     let _audio_tx_keepalive = audio_tx.clone();
-    let (ws_outbox_tx, mut ws_outbox_rx) = tokio::sync::mpsc::channel::<tokio_tungstenite::tungstenite::Message>(32);
+    let (ws_outbox_tx, mut ws_outbox_rx) =
+        tokio::sync::mpsc::channel::<tokio_tungstenite::tungstenite::Message>(32);
 
     let session_id = args.session_id;
 
@@ -1187,11 +1188,10 @@ async fn run_wayland_session(args: cli::Args) -> anyhow::Result<()> {
 
     // Clipboard bridge (X11 — via Xwayland; best-effort on pure Wayland).
     let clipboard = Arc::new(std::sync::Mutex::new(
-        clipboard::ClipboardBridge::new(&args.display)
-            .unwrap_or_else(|e| {
-                warn!("Clipboard bridge unavailable on Wayland session: {e:#}");
-                clipboard::ClipboardBridge::noop()
-            }),
+        clipboard::ClipboardBridge::new(&args.display).unwrap_or_else(|e| {
+            warn!("Clipboard bridge unavailable on Wayland session: {e:#}");
+            clipboard::ClipboardBridge::noop()
+        }),
     ));
 
     let force_keyframe = Arc::new(AtomicBool::new(false));
@@ -1446,8 +1446,7 @@ async fn run_wayland_session(args: cli::Args) -> anyhow::Result<()> {
         .context("Failed to spawn Wayland audio thread")?;
     let audio_handle = Some(audio_handle);
 
-    let mut sigterm =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     let server_url = args.server_url.clone();
     let kf_flag_for_signal = Arc::clone(&force_keyframe);

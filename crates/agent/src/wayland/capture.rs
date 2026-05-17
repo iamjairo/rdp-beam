@@ -219,7 +219,10 @@ impl WaylandCapture {
             .set_state(gst::State::Playing)
             .context("Failed to start Wayland pipeline")?;
 
-        info!(node_id, width, height, framerate, bitrate, "WaylandCapture pipeline started");
+        info!(
+            node_id,
+            width, height, framerate, bitrate, "WaylandCapture pipeline started"
+        );
 
         Ok(Self {
             pipeline,
@@ -262,7 +265,6 @@ impl WaylandCapture {
             info!("Forced IDR keyframe (WaylandCapture)");
         }
     }
-
 }
 
 impl ScreenCaptureBackend for WaylandCapture {
@@ -365,8 +367,8 @@ fn open_portal_session(
     .context("CreateSession gdbus call failed")?;
     debug!(output = %create_out, "CreateSession output");
 
-    let create_req_path = parse_object_path(&create_out)
-        .context("Failed to parse CreateSession request path")?;
+    let create_req_path =
+        parse_object_path(&create_out).context("Failed to parse CreateSession request path")?;
     let session_handle = gdbus_wait_response(
         xdg_runtime_dir,
         wayland_display,
@@ -395,8 +397,8 @@ fn open_portal_session(
         ),
     )
     .context("SelectSources gdbus call failed")?;
-    let sel_req_path = parse_object_path(&sel_out)
-        .context("Failed to parse SelectSources request path")?;
+    let sel_req_path =
+        parse_object_path(&sel_out).context("Failed to parse SelectSources request path")?;
     gdbus_wait_response(
         xdg_runtime_dir,
         wayland_display,
@@ -421,8 +423,8 @@ fn open_portal_session(
         ),
     )
     .context("Start gdbus call failed")?;
-    let start_req_path = parse_object_path(&start_out)
-        .context("Failed to parse Start request path")?;
+    let start_req_path =
+        parse_object_path(&start_out).context("Failed to parse Start request path")?;
     let streams_raw = gdbus_wait_response(
         xdg_runtime_dir,
         wayland_display,
@@ -495,7 +497,10 @@ fn gdbus_wait_response(
         .spawn()
         .context("Failed to spawn gdbus monitor")?;
 
-    let stdout = child.stdout.take().context("No stdout from gdbus monitor")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("No stdout from gdbus monitor")?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
 
     use std::io::{BufRead, BufReader};
@@ -640,7 +645,12 @@ fn build_wayland_pipeline(
     // Downstream H.264 chain from the shared helper in encoder.rs.
     let (encoder_elem, profile_capsfilter, parser, parse_capsfilter, appsink) =
         build_h264_pipeline_from_src(
-            encoder_type, encoder_name, width, height, framerate, bitrate,
+            encoder_type,
+            encoder_name,
+            width,
+            height,
+            framerate,
+            bitrate,
         )
         .context("Failed to build H.264 downstream chain")?;
 

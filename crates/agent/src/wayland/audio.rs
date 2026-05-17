@@ -157,9 +157,7 @@ impl AudioBackend for WaylandAudio {
         // Mirrors `libpulse_simple::flush()` semantics that the Xorg path
         // uses to drop startup desync.
         let _ = self.pipeline.send_event(gst::event::FlushStart::new());
-        let _ = self
-            .pipeline
-            .send_event(gst::event::FlushStop::new(false));
+        let _ = self.pipeline.send_event(gst::event::FlushStop::new(false));
         debug!("WaylandAudio flushed");
     }
 
