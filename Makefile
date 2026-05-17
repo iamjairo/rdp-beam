@@ -13,7 +13,9 @@
 
 .PHONY: build build-release build-web build-rust \
         dev run test lint fmt check ci pre-push install-hooks version-check bump-version \
-        install uninstall deploy clean setup doctor help
+        install uninstall deploy clean setup doctor help \
+        docker-build-2404 docker-build-2604 docker-check-2404 docker-check-2604 \
+        desktop-electron desktop-electron-dev desktop-tauri desktop-tauri-dev
 
 CARGO := cargo
 NPM := npm
@@ -132,10 +134,22 @@ install-hooks:
 version-check:
 	@CARGO_VER=$$(grep -A5 '^\[workspace\.package\]' Cargo.toml | grep '^version' | sed 's/.*"\(.*\)"/\1/'); \
 	WEB_VER=$$(node -p "require('./web/package.json').version"); \
-	echo "Cargo.toml version: $$CARGO_VER"; \
-	echo "package.json version: $$WEB_VER"; \
+	ELECTRON_VER=$$(node -p "require('./desktop-electron/package.json').version" 2>/dev/null || echo ""); \
+	TAURI_VER=$$(grep '^version' desktop-tauri/Cargo.toml 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/' || echo ""); \
+	echo "Cargo.toml version:                $$CARGO_VER"; \
+	echo "web/package.json version:          $$WEB_VER"; \
+	echo "desktop-electron/package.json:     $${ELECTRON_VER:-<not present>}"; \
+	echo "desktop-tauri/Cargo.toml:          $${TAURI_VER:-<not present>}"; \
 	if [ "$$CARGO_VER" != "$$WEB_VER" ]; then \
-		echo "ERROR: Version mismatch! Cargo.toml ($$CARGO_VER) != package.json ($$WEB_VER)"; \
+		echo "ERROR: Version mismatch! Cargo.toml ($$CARGO_VER) != web/package.json ($$WEB_VER)"; \
+		exit 1; \
+	fi; \
+	if [ -n "$$ELECTRON_VER" ] && [ "$$CARGO_VER" != "$$ELECTRON_VER" ]; then \
+		echo "ERROR: Version mismatch! Cargo.toml ($$CARGO_VER) != desktop-electron/package.json ($$ELECTRON_VER)"; \
+		exit 1; \
+	fi; \
+	if [ -n "$$TAURI_VER" ] && [ "$$CARGO_VER" != "$$TAURI_VER" ]; then \
+		echo "ERROR: Version mismatch! Cargo.toml ($$CARGO_VER) != desktop-tauri/Cargo.toml ($$TAURI_VER)"; \
 		exit 1; \
 	fi; \
 	if [ -n "$$GITHUB_REF_NAME" ]; then \
@@ -152,11 +166,22 @@ version-check:
 	echo "Version check passed: $$CARGO_VER"
 
 # Usage: make bump-version VERSION=0.2.0
+# Updates: Cargo.toml (workspace), web/package.json, desktop-electron/package.json,
+# desktop-tauri/Cargo.toml. version-check fails the build if any drift remains.
 bump-version:
 	@if [ -z "$(VERSION)" ]; then echo "Usage: make bump-version VERSION=x.y.z"; exit 1; fi
 	@echo "Bumping version to $(VERSION)..."
 	@sed -i '/^\[workspace\.package\]/,/^\[/ s/^version = ".*"/version = "$(VERSION)"/' Cargo.toml
 	@node -e "const fs=require('fs'),p=JSON.parse(fs.readFileSync('web/package.json','utf8')); p.version='$(VERSION)'; fs.writeFileSync('web/package.json',JSON.stringify(p,null,2)+'\n')"
+	@if [ -f desktop-electron/package.json ]; then \
+		node -e "const fs=require('fs'),p=JSON.parse(fs.readFileSync('desktop-electron/package.json','utf8')); p.version='$(VERSION)'; fs.writeFileSync('desktop-electron/package.json',JSON.stringify(p,null,2)+'\n')"; \
+	fi
+	@if [ -f desktop-tauri/Cargo.toml ]; then \
+		sed -i '/^\[package\]/,/^\[/ s/^version = ".*"/version = "$(VERSION)"/' desktop-tauri/Cargo.toml; \
+	fi
+	@if [ -f desktop-tauri/tauri.conf.json ]; then \
+		node -e "const fs=require('fs'),p=JSON.parse(fs.readFileSync('desktop-tauri/tauri.conf.json','utf8')); p.version='$(VERSION)'; fs.writeFileSync('desktop-tauri/tauri.conf.json',JSON.stringify(p,null,2)+'\n')"; \
+	fi
 	@cd web && npm install --package-lock-only --silent 2>/dev/null || true
 	@$(CARGO) check --quiet
 	@$(MAKE) version-check
@@ -220,3 +245,44 @@ doctor:
 clean:
 	$(CARGO) clean
 	rm -rf web/node_modules web/dist
+
+# === Containerised builds ===
+# Use when you don't have Ubuntu locally (Synology DSM, TrueNAS, macOS, NixOS).
+# Builds the same toolchain CI uses so results are reproducible.
+# DOCKER overridable: e.g. DOCKER=/usr/local/bin/docker make docker-check-2404
+DOCKER ?= docker
+
+docker-build-2404:
+	$(DOCKER) build -t beam-build-2404 -f docker/Dockerfile.dev-24.04 .
+
+docker-build-2604:
+	$(DOCKER) build -t beam-build-2604 -f docker/Dockerfile.dev-26.04 .
+
+docker-check-2404: docker-build-2404
+	$(DOCKER) run --rm \
+		-v "$(CURDIR)":/work -w /work \
+		-v beam-target-2404:/work/target \
+		-v beam-cargo-registry:/cargo/registry \
+		beam-build-2404 make check
+
+docker-check-2604: docker-build-2604
+	$(DOCKER) run --rm \
+		-v "$(CURDIR)":/work -w /work \
+		-v beam-target-2604:/work/target \
+		-v beam-cargo-registry:/cargo/registry \
+		beam-build-2604 make check
+
+# === Desktop shells ===
+# Both consume web/dist; they share the BeamNative contract declared in
+# web/src/native-bridge.ts.
+desktop-electron: build-web
+	cd desktop-electron && npm ci && npm run dist:linux
+
+desktop-electron-dev: build-web
+	cd desktop-electron && npm install && npm run dev
+
+desktop-tauri: build-web
+	cd desktop-tauri && cargo tauri build
+
+desktop-tauri-dev: build-web
+	cd desktop-tauri && cargo tauri dev

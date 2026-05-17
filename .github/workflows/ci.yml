@@ -98,6 +98,55 @@ jobs:
       - name: Build
         run: npm run build
 
+  # build-wayland: compile beam-agent with the optional `wayland` Cargo feature.
+  # This job exists to keep the feature compile-clean as the Wayland runtime is
+  # built out (packet A1). Until A1 lands the wayland module contains stubs and
+  # the feature is not wired up end-to-end; the job may fail at link time until
+  # all trait impls are complete. ubuntu-24.04 has older PipeWire headers than
+  # 26.04 but they are sufficient for compilation — runtime is verified separately.
+  build-wayland:
+    name: Build (wayland feature)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            pkg-config \
+            build-essential \
+            libclang-dev \
+            libpam0g-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev \
+            libpulse-dev libopus-dev \
+            libwayland-dev \
+            wayland-protocols \
+            libpipewire-0.3-dev \
+            libspa-0.2-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-wayland-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-wayland-
+
+      - name: Build (wayland feature)
+        run: cargo build --release --features wayland -p beam-agent
+
+      - name: Clippy (wayland feature)
+        run: cargo clippy --features wayland -p beam-agent -- -D warnings
+
   coverage:
     name: Coverage
     runs-on: ubuntu-24.04

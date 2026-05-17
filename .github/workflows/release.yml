@@ -28,9 +28,36 @@ jobs:
           NPM_VERSION=$(node -p "require('./web/package.json').version")
           TAG_VERSION="${GITHUB_REF_NAME#v}"
 
-          echo "Cargo.toml version: ${CARGO_VERSION}"
-          echo "package.json version: ${NPM_VERSION}"
-          echo "Git tag version: ${TAG_VERSION}"
+          echo "Cargo.toml version:           ${CARGO_VERSION}"
+          echo "web/package.json version:     ${NPM_VERSION}"
+          echo "Git tag version:              ${TAG_VERSION}"
+
+          # desktop-electron/package.json — skip if subproject absent
+          ELECTRON_VERSION=""
+          if [ -f desktop-electron/package.json ]; then
+            ELECTRON_VERSION=$(node -p "require('./desktop-electron/package.json').version")
+            echo "desktop-electron version:     ${ELECTRON_VERSION}"
+          else
+            echo "desktop-electron/package.json not present — skipping"
+          fi
+
+          # desktop-tauri/Cargo.toml — skip if subproject absent
+          TAURI_VERSION=""
+          if [ -f desktop-tauri/Cargo.toml ]; then
+            TAURI_VERSION=$(grep '^version' desktop-tauri/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+            echo "desktop-tauri/Cargo.toml version: ${TAURI_VERSION}"
+          else
+            echo "desktop-tauri/Cargo.toml not present — skipping"
+          fi
+
+          # desktop-tauri/tauri.conf.json — skip if absent
+          TAURI_CONF_VERSION=""
+          if [ -f desktop-tauri/tauri.conf.json ]; then
+            TAURI_CONF_VERSION=$(node -p "require('./desktop-tauri/tauri.conf.json').version")
+            echo "desktop-tauri/tauri.conf.json version: ${TAURI_CONF_VERSION}"
+          else
+            echo "desktop-tauri/tauri.conf.json not present — skipping"
+          fi
 
           MISMATCH=0
           if [ "${CARGO_VERSION}" != "${TAG_VERSION}" ]; then
@@ -38,15 +65,27 @@ jobs:
             MISMATCH=1
           fi
           if [ "${NPM_VERSION}" != "${TAG_VERSION}" ]; then
-            echo "::error::package.json version (${NPM_VERSION}) does not match git tag (${TAG_VERSION})"
+            echo "::error::web/package.json version (${NPM_VERSION}) does not match git tag (${TAG_VERSION})"
             MISMATCH=1
           fi
           if [ "${CARGO_VERSION}" != "${NPM_VERSION}" ]; then
-            echo "::error::Cargo.toml version (${CARGO_VERSION}) does not match package.json version (${NPM_VERSION})"
+            echo "::error::Cargo.toml version (${CARGO_VERSION}) does not match web/package.json version (${NPM_VERSION})"
+            MISMATCH=1
+          fi
+          if [ -n "${ELECTRON_VERSION}" ] && [ "${CARGO_VERSION}" != "${ELECTRON_VERSION}" ]; then
+            echo "::error::Cargo.toml version (${CARGO_VERSION}) does not match desktop-electron/package.json version (${ELECTRON_VERSION})"
+            MISMATCH=1
+          fi
+          if [ -n "${TAURI_VERSION}" ] && [ "${CARGO_VERSION}" != "${TAURI_VERSION}" ]; then
+            echo "::error::Cargo.toml version (${CARGO_VERSION}) does not match desktop-tauri/Cargo.toml version (${TAURI_VERSION})"
+            MISMATCH=1
+          fi
+          if [ -n "${TAURI_CONF_VERSION}" ] && [ "${CARGO_VERSION}" != "${TAURI_CONF_VERSION}" ]; then
+            echo "::error::Cargo.toml version (${CARGO_VERSION}) does not match desktop-tauri/tauri.conf.json version (${TAURI_CONF_VERSION})"
             MISMATCH=1
           fi
           if [ "${MISMATCH}" -eq 1 ]; then
-            echo "::error::Version mismatch detected. All versions must match: Cargo.toml, package.json, and git tag."
+            echo "::error::Version mismatch detected. All versions must match: Cargo.toml, web/package.json, desktop-electron/package.json, desktop-tauri/Cargo.toml, desktop-tauri/tauri.conf.json, and git tag."
             exit 1
           fi
           echo "All versions match: ${CARGO_VERSION}"
@@ -286,9 +325,203 @@ jobs:
           git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
           git push --force origin gh-pages
 
+  build-electron:
+    name: Build Electron (${{ matrix.os }})
+    needs: [version-check]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            desktop-electron/package-lock.json
+
+      - name: Build web renderer
+        run: cd web && npm ci && npm run build
+
+      - name: Install Electron dependencies
+        run: cd desktop-electron && npm ci
+
+      - name: Build Electron app (Linux)
+        if: matrix.os == 'ubuntu-24.04'
+        run: cd desktop-electron && npm run dist:linux
+
+      - name: Build Electron app (macOS)
+        if: matrix.os == 'macos-14'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          CSC_LINK: ${{ secrets.MAC_CERTIFICATE_BASE64 }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
+        run: cd desktop-electron && npm run dist:mac
+
+      - name: Build Electron app (Windows)
+        if: matrix.os == 'windows-2022'
+        run: cd desktop-electron && npm run dist:win
+
+      - name: Upload Linux artefacts
+        if: matrix.os == 'ubuntu-24.04'
+        uses: actions/upload-artifact@v4
+        with:
+          name: electron-linux
+          path: |
+            desktop-electron/dist/*.AppImage
+            desktop-electron/dist/*.deb
+            desktop-electron/dist/*.snap
+            desktop-electron/dist/latest-linux.yml
+
+      - name: Upload macOS artefacts
+        if: matrix.os == 'macos-14'
+        uses: actions/upload-artifact@v4
+        with:
+          name: electron-macos
+          path: |
+            desktop-electron/dist/*.dmg
+            desktop-electron/dist/latest-mac.yml
+
+      - name: Upload Windows artefacts
+        if: matrix.os == 'windows-2022'
+        uses: actions/upload-artifact@v4
+        with:
+          name: electron-windows
+          path: |
+            desktop-electron/dist/*.exe
+            desktop-electron/dist/*.msi
+            desktop-electron/dist/latest.yml
+
+  build-tauri:
+    name: Build Tauri (${{ matrix.os }})
+    needs: [version-check]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop-tauri/target
+          key: tauri-${{ matrix.os }}-${{ hashFiles('desktop-tauri/Cargo.lock') }}
+          restore-keys: tauri-${{ matrix.os }}-
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev
+
+      - name: Check Tauri updater pubkey is not placeholder
+        shell: bash
+        run: |
+          PUBKEY=$(node -e "process.stdout.write(require('./desktop-tauri/tauri.conf.json').plugins.updater.pubkey)")
+          if [ "${PUBKEY}" = "REPLACE_WITH_PUBKEY_BEFORE_FIRST_RELEASE" ]; then
+            echo "::error::tauri.conf.json updater pubkey is still the placeholder value. Set a real minisign public key before releasing."
+            exit 1
+          fi
+          if [ -z "${PUBKEY}" ]; then
+            echo "::error::tauri.conf.json updater pubkey is empty. Set a real minisign public key before releasing."
+            exit 1
+          fi
+          echo "Updater pubkey present — OK"
+
+      - name: Build Tauri app (Linux)
+        if: matrix.os == 'ubuntu-24.04'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: cd desktop-tauri && cargo tauri build
+
+      - name: Build Tauri app (macOS)
+        if: matrix.os == 'macos-14'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: cd desktop-tauri && cargo tauri build
+
+      - name: Build Tauri app (Windows)
+        if: matrix.os == 'windows-2022'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: cd desktop-tauri && cargo tauri build
+
+      - name: Upload Linux artefacts
+        if: matrix.os == 'ubuntu-24.04'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-linux
+          path: |
+            desktop-tauri/target/release/bundle/deb/*.deb
+            desktop-tauri/target/release/bundle/appimage/*.AppImage
+            desktop-tauri/target/release/bundle/appimage/*.AppImage.sig
+            desktop-tauri/target/release/bundle/deb/*.deb.sig
+            desktop-tauri/target/release/bundle/latest.json
+
+      - name: Upload macOS artefacts
+        if: matrix.os == 'macos-14'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-macos
+          path: |
+            desktop-tauri/target/release/bundle/dmg/*.dmg
+            desktop-tauri/target/release/bundle/dmg/*.dmg.sig
+            desktop-tauri/target/release/bundle/latest.json
+
+      - name: Upload Windows artefacts
+        if: matrix.os == 'windows-2022'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-windows
+          path: |
+            desktop-tauri/target/release/bundle/msi/*.msi
+            desktop-tauri/target/release/bundle/msi/*.msi.sig
+            desktop-tauri/target/release/bundle/nsis/*.exe
+            desktop-tauri/target/release/bundle/nsis/*.exe.sig
+            desktop-tauri/target/release/bundle/latest.json
+
   package:
     name: Create release
-    needs: [build-web, build-binary, test-package]
+    needs: [build-web, build-binary, test-package, build-electron, build-tauri]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -323,6 +556,13 @@ jobs:
           sha256sum deb-amd64/*.deb >> checksums.txt
           sha256sum deb-arm64/*.deb >> checksums.txt
 
+      - name: Add desktop artefact checksums
+        run: |
+          find electron-linux electron-macos electron-windows \
+               tauri-linux tauri-macos tauri-windows \
+               -type f ! -name '*.yml' ! -name '*.json' \
+               -exec sha256sum {} \; >> checksums.txt 2>/dev/null || true
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -331,4 +571,10 @@ jobs:
             beam-*.tar.gz
             deb-amd64/*.deb
             deb-arm64/*.deb
+            electron-linux/**
+            electron-macos/**
+            electron-windows/**
+            tauri-linux/**
+            tauri-macos/**
+            tauri-windows/**
             checksums.txt
