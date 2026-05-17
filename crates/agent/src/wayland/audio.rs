@@ -34,11 +34,7 @@
 //!
 //! ## Wiring status
 //!
-//! Same as `capture.rs`: this implementation is complete but `main.rs`
-//! does not yet dispatch to it. Drop the module-level `#[allow(dead_code)]`
-//! once A6 wires it in.
-
-#![allow(dead_code)]
+//! Wired via `run_wayland_session` in `main.rs`.
 
 use crate::audio::AudioBackend;
 use anyhow::{Context, bail};

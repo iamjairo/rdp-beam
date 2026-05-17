@@ -52,7 +52,6 @@ const BTN_RIGHT: u32 = 0x111;
 
 const SCROLL_PX_PER_UNIT: f64 = 15.0;
 
-#[allow(dead_code)]
 const WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1: u32 = 1;
 
 // ── Wayland registry state ────────────────────────────────────────────────────
@@ -64,7 +63,6 @@ struct WlState {
 }
 
 impl WlState {
-    #[allow(dead_code)]
     fn new() -> Self {
         Self { seat: None, vpm: None, vkm: None }
     }
@@ -161,7 +159,6 @@ impl WaylandInput {
     /// `wayland_display` is the socket name produced by the compositor packet,
     /// e.g. `"wayland-beam-99"`. `width`/`height` are shared atomics updated
     /// by the capture path with the compositor output size.
-    #[allow(dead_code)]
     pub fn new(
         wayland_display: &str,
         width: Arc<AtomicU32>,
@@ -320,7 +317,6 @@ impl InputBackend for WaylandInput {
 /// 1. `xkbcomp -xkb $DISPLAY -` — live layout from running X server.
 /// 2. `xkbcli compile-keymap --layout $XKB_DEFAULT_LAYOUT` — pure Wayland path.
 /// 3. Embedded `us` QWERTY keymap — last resort when neither tool is present.
-#[allow(dead_code)]
 fn build_xkb_keymap_string() -> anyhow::Result<String> {
     use std::process::Command;
 
@@ -360,7 +356,6 @@ fn build_xkb_keymap_string() -> anyhow::Result<String> {
     Ok(minimal_us_keymap())
 }
 
-#[allow(dead_code)]
 fn minimal_us_keymap() -> String {
     r#"xkb_keymap {
     xkb_keycodes  { include "evdev+aliases(qwerty)" };
@@ -376,7 +371,6 @@ fn minimal_us_keymap() -> String {
 ///
 /// Returns an `OwnedFd`. Caller uses `as_fd()` for the Wayland `keymap()`
 /// call; dropping the `OwnedFd` closes it (Wayland library dups before send).
-#[allow(dead_code)]
 fn write_keymap_to_memfd(keymap: &str) -> anyhow::Result<std::os::unix::io::OwnedFd> {
     // Use memfd_create on Linux for a true anonymous fd. On other targets
     // (macOS CI / cross-compile hosts) fall back to a regular temp file so
@@ -392,7 +386,7 @@ fn write_keymap_to_memfd(keymap: &str) -> anyhow::Result<std::os::unix::io::Owne
         }
         let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
         file.write_all(keymap.as_bytes()).context("write keymap")?;
-        return Ok(std::os::unix::io::OwnedFd::from(file));
+        Ok(std::os::unix::io::OwnedFd::from(file))
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -404,7 +398,6 @@ fn write_keymap_to_memfd(keymap: &str) -> anyhow::Result<std::os::unix::io::Owne
 }
 
 #[cfg(not(target_os = "linux"))]
-#[allow(dead_code)]
 fn tempfile_unlinked() -> anyhow::Result<std::fs::File> {
     let path = std::env::temp_dir().join(format!("beam-keymap-{}", std::process::id()));
     let f = std::fs::OpenOptions::new()

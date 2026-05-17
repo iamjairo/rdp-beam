@@ -50,12 +50,7 @@
 //! Set BEAM_WAYLAND_LATENCY_MEASURE=1 to log per-frame PTS deltas (encoder
 //! input latency proxy).  Off by default; zero overhead when off.
 //!
-//! **Wiring status**: this implementation is complete but `main.rs` does not
-//! yet dispatch to it (the dispatch still calls the simpler
-//! `wayland::compositor::WaylandDisplay::start` stub). Once `main.rs` learns
-//! to construct a `WaylandCapture` instead of (or alongside) the existing
-//! Xorg `XorgCapture`, drop the module-level `#[allow(dead_code)]` below.
-#![allow(dead_code)]
+//! **Wiring status**: wired via `run_wayland_session` in `main.rs`.
 
 use crate::capture::{PooledFrame, ScreenCaptureBackend};
 use crate::encoder::{EncoderType, build_h264_pipeline_from_src};
@@ -83,7 +78,7 @@ pub struct WaylandCapture {
     pipeline_error: Arc<AtomicBool>,
     width: u32,
     height: u32,
-    latency: Arc<LatencyMeter>,
+    _latency: Arc<LatencyMeter>,
     /// Keeps the portal session alive.  Dropping closes the screencast stream.
     _portal_session: PortalSession,
 }
@@ -233,7 +228,7 @@ impl WaylandCapture {
             pipeline_error,
             width,
             height,
-            latency,
+            _latency: latency,
             _portal_session: portal_session,
         })
     }
@@ -268,10 +263,6 @@ impl WaylandCapture {
         }
     }
 
-    /// Access the latency meter for diagnostic logging.
-    pub fn latency_meter(&self) -> &LatencyMeter {
-        &self.latency
-    }
 }
 
 impl ScreenCaptureBackend for WaylandCapture {

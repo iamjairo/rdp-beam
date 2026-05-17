@@ -47,7 +47,6 @@ use tracing::{info, warn};
 /// startup and consulted later by `WaylandCapture` to set up the pipewiresrc
 /// caps. They're stored on `WaylandDisplay` itself so the capture path can
 /// retrieve them without re-reading config.
-#[allow(dead_code)]
 pub struct WaylandDisplayConfig {
     pub display_num: u32,
     pub width: u32,
@@ -78,12 +77,26 @@ pub struct WaylandDisplay {
 }
 
 impl WaylandDisplay {
+    /// The Wayland socket name, e.g. `"wayland-beam-10"`. Passed to
+    /// `WaylandCapture::new` and `WaylandInput::new`.
+    pub fn wayland_display(&self) -> &str {
+        &self.wayland_display
+    }
+
+    /// The private XDG_RUNTIME_DIR for this session. Passed to
+    /// `WaylandCapture::new` and `WaylandAudio::new`.
+    pub fn xdg_runtime_dir(&self) -> &str {
+        self.xdg_runtime_dir.to_str().unwrap_or("")
+    }
+
     /// Spawn a headless wlroots compositor.
     ///
     /// Blocks up to 5 seconds waiting for the Wayland socket to appear.
     /// On failure, the compositor child is killed before returning the Err.
     pub fn start(config: WaylandDisplayConfig) -> Result<Self> {
         let display_num = config.display_num;
+        let width = config.width;
+        let height = config.height;
         let wayland_display = format!("wayland-beam-{display_num}");
         let xdg_runtime_dir = PathBuf::from(format!("/tmp/beam-xdg-{display_num}"));
         let output_name = format!("WAYLAND-{display_num}");
@@ -111,6 +124,8 @@ impl WaylandDisplay {
 
         info!(
             display_num,
+            width,
+            height,
             wayland_display = %wayland_display,
             xdg_runtime_dir = %xdg_runtime_dir.display(),
             compositor = %compositor_choice,
