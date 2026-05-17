@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <!-- V8 JIT compilation. Required by all Electron versions. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+
+    <!-- V8 writable+executable memory (same requirement as JIT but covers
+         the RWX mapping V8 uses for code patching). Required by Electron. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- keytar (native module) loads a system Security.framework plugin
+         at runtime. Without this entitlement Gatekeeper blocks it under
+         hardened runtime because the plugin is not signed by us. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- Beam connects to the remote agent over HTTPS/WSS. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+  </dict>
+</plist>

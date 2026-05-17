@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Beam master icon.
+       Concept: a filled disc with a single offset highlight, evoking a beam of
+       light on a curved surface. Matches the existing web/public/favicon.svg
+       motif (filled circle) but with depth so it reads at 16x16. -->
+  <defs>
+    <radialGradient id="beam" cx="40%" cy="35%" r="75%">
+      <stop offset="0%" stop-color="#5a9bff"/>
+      <stop offset="60%" stop-color="#3a6fd0"/>
+      <stop offset="100%" stop-color="#1a3a78"/>
+    </radialGradient>
+    <radialGradient id="highlight" cx="35%" cy="28%" r="22%">
+      <stop offset="0%" stop-color="rgba(255,255,255,0.55)"/>
+      <stop offset="100%" stop-color="rgba(255,255,255,0)"/>
+    </radialGradient>
+  </defs>
+  <circle cx="512" cy="512" r="448" fill="url(#beam)"/>
+  <circle cx="512" cy="512" r="448" fill="url(#highlight)"/>
+</svg>

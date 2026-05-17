@@ -1,0 +1,71 @@
+{
+  "name": "beam-desktop-electron",
+  "version": "0.3.22",
+  "description": "Beam Remote Desktop - Electron native client",
+  "private": true,
+  "main": "dist/main.js",
+  "scripts": {
+    "build:web": "cd ../web && npm run build",
+    "build:ts": "tsc",
+    "build": "npm run build:web && npm run build:ts",
+    "dev": "npm run build && electron .",
+    "dist": "npm run build && electron-builder --linux --mac --win",
+    "dist:linux": "npm run build && electron-builder --linux",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:win": "npm run build && electron-builder --win"
+  },
+  "dependencies": {
+    "electron-store": "^10.0.1",
+    "electron-updater": "^6.3.9",
+    "keytar": "^7.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.10",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "typescript": "^6.0.3"
+  },
+  "build": {
+    "appId": "com.beam.desktop",
+    "productName": "Beam",
+    "files": [
+      "dist/**/*",
+      "../web/dist/**/*",
+      "build/**/*"
+    ],
+    "extraMetadata": {
+      "main": "dist/main.js"
+    },
+    "protocols": [
+      {
+        "name": "Beam",
+        "schemes": ["beam"]
+      }
+    ],
+    "linux": {
+      "target": ["AppImage", "deb", "snap"],
+      "category": "Network",
+      "icon": "build/icon.png"
+    },
+    "mac": {
+      "target": ["dmg"],
+      "category": "public.app-category.utilities",
+      "icon": "build/icon.icns",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.inherit.plist"
+    },
+    "win": {
+      "target": ["nsis"],
+      "icon": "build/icon.ico"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "frecar",
+        "repo": "beam"
+      }
+    ]
+  }
+}

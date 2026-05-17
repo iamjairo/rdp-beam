@@ -1,0 +1,63 @@
+{
+  "$schema": "https://schema.tauri.app/config/2.0",
+  "productName": "Beam",
+  "version": "0.3.22",
+  "identifier": "com.beam.desktop",
+  "build": {
+    "beforeDevCommand": "cd ../web && npm run dev",
+    "beforeBuildCommand": "cd ../web && npm run build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../web/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Beam",
+        "width": 1600,
+        "height": 900,
+        "minWidth": 800,
+        "minHeight": 600,
+        "backgroundColor": "#0a0a0a"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' blob: data:; connect-src 'self' wss: https:; img-src 'self' blob: data:; media-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    },
+    "trayIcon": {
+      "iconPath": "icons/tray.png",
+      "iconAsTemplate": true,
+      "menuOnLeftClick": false
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "appimage", "dmg", "msi", "nsis"],
+    "category": "Network",
+    "shortDescription": "Beam remote desktop client",
+    "longDescription": "Native shell for the Beam remote desktop web client.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0"]
+      }
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["beam"]
+      }
+    },
+    "updater": {
+      "endpoints": [
+        "https://github.com/frecar/beam/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDYyODFFNTEzQjZCNDA3NApSV1IwUUdzN1VSNG9CbE8yZkI2MzIwNFFVcGQrL3NxdVdSN2VrMURJZHArMUFGSlZCbTArSm15Ygo="
+    }
+  }
+}
