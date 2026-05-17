@@ -7,12 +7,27 @@ use x11rb::protocol::xproto;
 use x11rb::protocol::xtest;
 use x11rb::rust_connection::RustConnection;
 
+/// Abstraction over input-injection implementations.
+///
+/// The Wayland backend (behind `#[cfg(feature = "wayland")]`) stubs this
+/// trait and bails at runtime until `wlr-virtual-keyboard-v1` /
+/// `wlr-virtual-pointer-v1` are wired up.
+// See ScreenCaptureBackend for why `dead_code` is allowed here.
+#[allow(dead_code)]
+pub trait InputBackend: Send {
+    fn inject_key(&mut self, code: u16, pressed: bool) -> anyhow::Result<()>;
+    fn inject_mouse_move_abs(&mut self, x: f64, y: f64) -> anyhow::Result<()>;
+    fn inject_mouse_move_rel(&mut self, dx: f64, dy: f64) -> anyhow::Result<()>;
+    fn inject_button(&mut self, button: u8, pressed: bool) -> anyhow::Result<()>;
+    fn inject_scroll(&mut self, dx: f64, dy: f64) -> anyhow::Result<()>;
+}
+
 /// Input injector using X11 XTEST extension.
 ///
 /// Injects keyboard, mouse, and scroll events directly into the X server
 /// via XTestFakeInput. This bypasses udev/uinput entirely — no kernel
 /// device creation needed, works regardless of AutoAddDevices setting.
-pub struct InputInjector {
+pub struct XorgInput {
     conn: RustConnection,
     root: xproto::Window,
     width: Arc<AtomicU32>,
@@ -22,7 +37,7 @@ pub struct InputInjector {
     scroll_accum_y: f64,
 }
 
-impl InputInjector {
+impl XorgInput {
     pub fn new(
         x_display: &str,
         width: Arc<AtomicU32>,
@@ -216,6 +231,28 @@ impl InputInjector {
     }
 }
 
+impl InputBackend for XorgInput {
+    fn inject_key(&mut self, code: u16, pressed: bool) -> anyhow::Result<()> {
+        self.inject_key(code, pressed)
+    }
+
+    fn inject_mouse_move_abs(&mut self, x: f64, y: f64) -> anyhow::Result<()> {
+        self.inject_mouse_move_abs(x, y)
+    }
+
+    fn inject_mouse_move_rel(&mut self, dx: f64, dy: f64) -> anyhow::Result<()> {
+        self.inject_mouse_move_rel(dx, dy)
+    }
+
+    fn inject_button(&mut self, button: u8, pressed: bool) -> anyhow::Result<()> {
+        self.inject_button(button, pressed)
+    }
+
+    fn inject_scroll(&mut self, dx: f64, dy: f64) -> anyhow::Result<()> {
+        self.inject_scroll(dx, dy)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,23 +261,23 @@ mod tests {
 
     #[test]
     fn button_left() {
-        assert_eq!(InputInjector::map_button(0).unwrap(), 1);
+        assert_eq!(XorgInput::map_button(0).unwrap(), 1);
     }
 
     #[test]
     fn button_middle() {
-        assert_eq!(InputInjector::map_button(1).unwrap(), 2);
+        assert_eq!(XorgInput::map_button(1).unwrap(), 2);
     }
 
     #[test]
     fn button_right() {
-        assert_eq!(InputInjector::map_button(2).unwrap(), 3);
+        assert_eq!(XorgInput::map_button(2).unwrap(), 3);
     }
 
     #[test]
     fn button_unknown_rejected() {
-        assert!(InputInjector::map_button(3).is_err());
-        assert!(InputInjector::map_button(255).is_err());
+        assert!(XorgInput::map_button(3).is_err());
+        assert!(XorgInput::map_button(255).is_err());
     }
 
     // --- Scroll accumulation ---
@@ -248,7 +285,7 @@ mod tests {
     #[test]
     fn accumulate_scroll_single_full_notch() {
         let mut accum = 0.0;
-        let discrete = InputInjector::accumulate_scroll(&mut accum, 1.0);
+        let discrete = XorgInput::accumulate_scroll(&mut accum, 1.0);
         assert_eq!(discrete, 1);
         assert!(accum.abs() < 0.001);
     }
@@ -256,24 +293,24 @@ mod tests {
     #[test]
     fn accumulate_scroll_fractional_accumulates() {
         let mut accum = 0.0;
-        assert_eq!(InputInjector::accumulate_scroll(&mut accum, 0.3), 0);
-        assert_eq!(InputInjector::accumulate_scroll(&mut accum, 0.3), 0);
-        assert_eq!(InputInjector::accumulate_scroll(&mut accum, 0.3), 0);
-        assert_eq!(InputInjector::accumulate_scroll(&mut accum, 0.3), 1);
+        assert_eq!(XorgInput::accumulate_scroll(&mut accum, 0.3), 0);
+        assert_eq!(XorgInput::accumulate_scroll(&mut accum, 0.3), 0);
+        assert_eq!(XorgInput::accumulate_scroll(&mut accum, 0.3), 0);
+        assert_eq!(XorgInput::accumulate_scroll(&mut accum, 0.3), 1);
         assert!((accum - 0.2).abs() < 0.001);
     }
 
     #[test]
     fn accumulate_scroll_negative_direction() {
         let mut accum = 0.0;
-        assert_eq!(InputInjector::accumulate_scroll(&mut accum, -1.0), -1);
+        assert_eq!(XorgInput::accumulate_scroll(&mut accum, -1.0), -1);
         assert!(accum.abs() < 0.001);
     }
 
     #[test]
     fn accumulate_scroll_large_jump() {
         let mut accum = 0.0;
-        let discrete = InputInjector::accumulate_scroll(&mut accum, 5.7);
+        let discrete = XorgInput::accumulate_scroll(&mut accum, 5.7);
         assert_eq!(discrete, 5);
         assert!((accum - 0.7).abs() < 0.001);
     }
@@ -281,18 +318,18 @@ mod tests {
     #[test]
     fn accumulate_scroll_preserves_fraction_across_calls() {
         let mut accum = 0.0;
-        InputInjector::accumulate_scroll(&mut accum, 0.5);
+        XorgInput::accumulate_scroll(&mut accum, 0.5);
         assert!((accum - 0.5).abs() < 0.001);
-        InputInjector::accumulate_scroll(&mut accum, 0.5);
+        XorgInput::accumulate_scroll(&mut accum, 0.5);
         assert!(accum.abs() < 0.001);
     }
 
     #[test]
     fn accumulate_scroll_direction_change() {
         let mut accum = 0.0;
-        InputInjector::accumulate_scroll(&mut accum, 0.5);
+        XorgInput::accumulate_scroll(&mut accum, 0.5);
         assert!((accum - 0.5).abs() < 0.001);
-        InputInjector::accumulate_scroll(&mut accum, -0.5);
+        XorgInput::accumulate_scroll(&mut accum, -0.5);
         assert!(accum.abs() < 0.001);
     }
 }

@@ -9,6 +9,22 @@ description = "Beam remote desktop per-user agent"
 name = "beam-agent"
 path = "src/main.rs"
 
+[features]
+# Default is the existing Xorg path. Wayland support is opt-in to keep the
+# build matrix simple: 24.04 builders don't need libwayland-dev / pipewire-dev
+# headers, and the .deb produced for 24.04 hosts stays the same as today.
+default = []
+wayland = [
+    "dep:wayland-client",
+    "dep:wayland-protocols",
+    "dep:wayland-protocols-wlr",
+    # NOTE: `zbus` is intentionally not in this list. The scaffolded
+    # PipeWire portal handshake in `wayland/wip/capture-a3-pipewiresrc.rs`
+    # uses it, but until that lands in the active capture.rs path, leaving
+    # zbus out keeps the dep tree minimal and dodges async-fs compile
+    # issues with zbus 4 on Ubuntu 26.04.
+]
+
 [dependencies]
 beam-protocol = { workspace = true }
 serde = { workspace = true }
@@ -36,3 +52,11 @@ futures-util = "0.3"
 urlencoding = "2"
 rustls-pemfile = { workspace = true }
 base64 = "0.22"
+
+# Wayland deps — pulled in only when the `wayland` feature is enabled.
+wayland-client = { workspace = true, optional = true }
+wayland-protocols = { workspace = true, optional = true }
+wayland-protocols-wlr = { workspace = true, optional = true }
+# zbus is declared in workspace.dependencies for future use by the
+# scaffolded portal handshake in wayland/wip/, but not pulled into the
+# active wayland feature path yet (see [features] above).

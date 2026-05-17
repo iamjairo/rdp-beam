@@ -51,6 +51,17 @@ gstreamer-video = "0.25"
 # X11
 x11rb = { version = "0.13.2", features = ["shm", "randr", "xfixes", "xtest", "allow-unsafe-code"] }
 
+# Wayland (headless compositor / virtual input). Opt-in via the `wayland`
+# feature on beam-agent; on 24.04 builds these are not compiled in, so the
+# absence of libwayland-dev / wayland-protocols on the build host is fine.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# D-Bus for xdg-desktop-portal ScreenCast session negotiation (Wayland only).
+# blocking feature avoids pulling in async runtime — the portal handshake is
+# one-shot at startup, not on the hot path.
+zbus = { version = "4", default-features = false, features = ["blocking"] }
+
 # Input
 nix = { version = "0.31.3", features = ["ioctl", "fs", "process", "signal", "user"] }
 

@@ -4,6 +4,26 @@ use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use tracing::{debug, info, warn};
 
+/// Abstraction over virtual-display lifecycle.
+///
+/// A `DisplayBackend` owns the compositor / Xorg process and exposes the
+/// operations that `main.rs` uses to stand up a session.  The Wayland
+/// backend (behind `#[cfg(feature = "wayland")]`) stubs this trait and
+/// bails at runtime until the cage compositor path is wired up.
+// See capture::ScreenCaptureBackend for why `dead_code` is allowed here.
+#[allow(dead_code)]
+pub trait DisplayBackend: Send {
+    /// xrandr (Xorg) or Wayland output name used for resize operations.
+    fn output_name(&self) -> &str;
+    /// Launch a desktop environment on top of the display.
+    fn start_desktop(&mut self) -> Result<()>;
+    /// Start an audio daemon bound to this session.
+    fn start_pulseaudio(&mut self) -> Result<()>;
+    /// Hide the hardware cursor so the browser-rendered cursor is the only
+    /// visible one.
+    fn hide_cursor(&mut self);
+}
+
 /// Minimal PulseAudio config for virtual desktop sessions.
 /// Creates a null sink (virtual audio output) with a monitor source
 /// that the agent can capture from.
@@ -21,7 +41,7 @@ load-module module-always-sink
 }
 
 /// Manages a virtual X display using either the dummy or nvidia video driver.
-pub struct VirtualDisplay {
+pub struct XorgVirtualDisplay {
     display_num: u32,
     /// xrandr output name (e.g. "DUMMY0" for dummy driver, "DFP-1" for nvidia)
     output_name: String,
@@ -35,7 +55,7 @@ pub struct VirtualDisplay {
     cleanup_edid: Option<String>,
 }
 
-impl VirtualDisplay {
+impl XorgVirtualDisplay {
     /// Create and start a new virtual X display on the given display number.
     ///
     /// `gpu_driver` controls the Xorg driver: "auto" (detect), "nvidia" (force), "dummy" (force).
@@ -646,7 +666,25 @@ impl VirtualDisplay {
     }
 }
 
-impl Drop for VirtualDisplay {
+impl DisplayBackend for XorgVirtualDisplay {
+    fn output_name(&self) -> &str {
+        self.output_name()
+    }
+
+    fn start_desktop(&mut self) -> Result<()> {
+        self.start_desktop()
+    }
+
+    fn start_pulseaudio(&mut self) -> Result<()> {
+        self.start_pulseaudio()
+    }
+
+    fn hide_cursor(&mut self) {
+        self.hide_cursor();
+    }
+}
+
+impl Drop for XorgVirtualDisplay {
     fn drop(&mut self) {
         /// Gracefully stop a child process: check if still running before
         /// sending SIGTERM to avoid killing an unrelated process if the
@@ -765,7 +803,7 @@ pub fn clamp_resize_dimensions(
 
 /// Change display resolution using xrandr. Standalone function that only needs
 /// the X display string (e.g. ":10"), so it can be called from the capture thread
-/// without owning a VirtualDisplay reference.
+/// without owning a XorgVirtualDisplay reference.
 pub fn set_display_resolution(
     x_display: &str,
     width: u32,

@@ -11,6 +11,24 @@ const BYTES_PER_PIXEL: u32 = 4; // BGRA
 /// one being encoded by GStreamer, and one spare to absorb timing jitter.
 const POOL_SIZE: usize = 3;
 
+/// Abstraction over screen-capture implementations.
+///
+/// Each backend produces `PooledFrame` values so the encoder pipeline stays
+/// unchanged across backends.  The Wayland implementation (behind
+/// `#[cfg(feature = "wayland")]`) stubs this trait and bails at runtime until
+/// the PipeWire capture path is wired up.
+// Allowed-dead-code because the trait only has multiple impls under
+// `--features wayland`; the default Xorg-only build uses XorgCapture
+// directly without polymorphic dispatch. A2's PipeWire impl converts this
+// into real polymorphism.
+#[allow(dead_code)]
+pub trait ScreenCaptureBackend: Send {
+    /// Capture one frame.  Blocks until the frame is ready.
+    fn capture_frame(&mut self) -> anyhow::Result<PooledFrame>;
+    fn width(&self) -> u32;
+    fn height(&self) -> u32;
+}
+
 /// A frame buffer checked out from the pool. When dropped (e.g. after
 /// GStreamer finishes encoding), the backing Vec is returned to the pool
 /// for reuse, eliminating per-frame allocation overhead (~8MB at 1080p).
@@ -40,7 +58,8 @@ impl Drop for PooledFrame {
     }
 }
 
-pub struct ScreenCapture {
+/// Xorg/XCB-SHM screen capture backend.
+pub struct XorgCapture {
     conn: RustConnection,
     root: u32,
     width: u32,
@@ -57,9 +76,9 @@ pub struct ScreenCapture {
 
 // SAFETY: The SHM pointer is only accessed through &mut self methods,
 // so there is no concurrent access.
-unsafe impl Send for ScreenCapture {}
+unsafe impl Send for XorgCapture {}
 
-impl ScreenCapture {
+impl XorgCapture {
     pub fn new(x_display: &str) -> anyhow::Result<Self> {
         let (conn, screen_num) =
             RustConnection::connect(Some(x_display)).context("Failed to connect to X display")?;
@@ -144,7 +163,7 @@ impl ScreenCapture {
     /// into a pre-allocated buffer from the pool, then passed to the encoder
     /// via `gst::Buffer::from_slice`. When GStreamer finishes encoding, the
     /// buffer is automatically returned to the pool for reuse.
-    pub fn capture_frame(&mut self) -> anyhow::Result<PooledFrame> {
+    fn capture_frame_inner(&mut self) -> anyhow::Result<PooledFrame> {
         shm::get_image(
             &self.conn,
             self.root,
@@ -199,7 +218,21 @@ impl ScreenCapture {
     }
 }
 
-impl Drop for ScreenCapture {
+impl ScreenCaptureBackend for XorgCapture {
+    fn capture_frame(&mut self) -> anyhow::Result<PooledFrame> {
+        self.capture_frame_inner()
+    }
+
+    fn width(&self) -> u32 {
+        self.width
+    }
+
+    fn height(&self) -> u32 {
+        self.height
+    }
+}
+
+impl Drop for XorgCapture {
     fn drop(&mut self) {
         let _ = shm::detach(&self.conn, self.shm_seg);
         let _ = self.conn.flush();

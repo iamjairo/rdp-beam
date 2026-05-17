@@ -4,7 +4,21 @@ use libpulse_binding as pulse;
 use libpulse_simple_binding::Simple;
 use tracing::info;
 
-pub struct AudioCapture {
+/// Abstraction over audio-capture implementations.
+///
+/// The Wayland backend (behind `#[cfg(feature = "wayland")]`) stubs this
+/// trait and bails at runtime until the PipeWire native capture path is
+/// wired up.
+// See capture::ScreenCaptureBackend for why `dead_code` is allowed here.
+#[allow(dead_code)]
+pub trait AudioBackend: Send {
+    /// Discard buffered audio from the source to avoid startup desync.
+    fn flush(&mut self);
+    /// Capture one Opus frame (~20 ms) and return the encoded bytes.
+    fn capture_and_encode(&mut self) -> anyhow::Result<Vec<u8>>;
+}
+
+pub struct XorgAudio {
     simple: Simple,
     opus_encoder: OpusEncoder,
     pcm_buffer: Vec<u8>,
@@ -13,7 +27,7 @@ pub struct AudioCapture {
     samples_buffer: Vec<i16>,
 }
 
-impl AudioCapture {
+impl XorgAudio {
     pub fn new(
         sample_rate: u32,
         channels: u16,
@@ -117,13 +131,23 @@ impl AudioCapture {
     }
 }
 
+impl AudioBackend for XorgAudio {
+    fn flush(&mut self) {
+        self.flush();
+    }
+
+    fn capture_and_encode(&mut self) -> anyhow::Result<Vec<u8>> {
+        self.capture_and_encode()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn audio_capture_rejects_invalid_server() {
-        let result = AudioCapture::new(48000, 2, Some("/tmp/nonexistent-pulse-server"));
+        let result = XorgAudio::new(48000, 2, Some("/tmp/nonexistent-pulse-server"));
         assert!(
             result.is_err(),
             "Should fail with bogus PulseAudio server path"

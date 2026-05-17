@@ -477,6 +477,84 @@ fn build_encoder_element(
     Ok(elem)
 }
 
+/// Build the H.264 encoder downstream chain without a source element.
+///
+/// Used by `WaylandCapture` (Architecture A) to share the H.264 encoding
+/// configuration with the Xorg `Encoder` without duplicating the encoder
+/// parameter logic. The Wayland path provides its own source (`pipewiresrc`)
+/// and a `videoconvert` upstream; this function returns only:
+///
+/// `(encoder_element, profile_capsfilter, h264parse, parse_capsfilter, appsink)`
+///
+/// The caller is responsible for adding all returned elements to a pipeline and
+/// linking them in order (with any intervening source/convert elements first).
+///
+/// The returned `appsink` has name `"sink"` so `WaylandCapture` can look it up
+/// by name to attach callbacks.
+#[cfg(feature = "wayland")]
+pub fn build_h264_pipeline_from_src(
+    encoder_type: EncoderType,
+    encoder_name: &str,
+    width: u32,
+    height: u32,
+    framerate: u32,
+    bitrate: u32,
+) -> anyhow::Result<(
+    gst::Element,     // encoder
+    gst::Element,     // profile capsfilter
+    gst::Element,     // h264parse
+    gst::Element,     // parse_capsfilter (byte-stream, au)
+    AppSink,          // appsink (name="sink")
+)> {
+    let encoder = build_encoder_element(encoder_type, encoder_name, bitrate, framerate)
+        .with_context(|| format!("Failed to create encoder element '{encoder_name}'"))?;
+
+    let profile_caps = gst::Caps::builder("video/x-h264")
+        .field("profile", "main")
+        .build();
+    let profile_capsfilter = ElementFactory::make("capsfilter")
+        .property("caps", &profile_caps)
+        .build()
+        .context("Failed to create profile capsfilter (wayland)")?;
+
+    let parser = ElementFactory::make("h264parse")
+        .property_from_str("config-interval", "-1")
+        .build()
+        .context("Failed to create h264parse (wayland)")?;
+
+    let parse_caps = gst::Caps::builder("video/x-h264")
+        .field("stream-format", "byte-stream")
+        .field("alignment", "au")
+        .build();
+    let parse_capsfilter = ElementFactory::make("capsfilter")
+        .name("parse-caps")
+        .property("caps", &parse_caps)
+        .build()
+        .context("Failed to create h264parse output capsfilter (wayland)")?;
+
+    // Constraints match the Xorg path: max 1 buffer, drop on overflow,
+    // async=false (no clock sync on state changes).
+    // Wayland's pipewiresrc drives its own clock, so sync=false is correct.
+    let appsink_elem = ElementFactory::make("appsink")
+        .name("sink")
+        .property("sync", false)
+        .property("async", false)
+        .property("emit-signals", true)
+        .property("max-buffers", 1u32)
+        .property("drop", true)
+        .build()
+        .context("Failed to create appsink (wayland)")?;
+    let appsink = appsink_elem
+        .dynamic_cast::<AppSink>()
+        .map_err(|_| anyhow::anyhow!("Failed to cast appsink element (wayland)"))?;
+
+    // Width/height are captured for logging only; the caps negotiation happens
+    // automatically through GStreamer's pad negotiation.
+    let _ = (width, height); // suppress unused warning if logging is stripped
+
+    Ok((encoder, profile_capsfilter, parser, parse_capsfilter, appsink))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
