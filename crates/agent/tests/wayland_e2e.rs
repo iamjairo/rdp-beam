@@ -17,50 +17,40 @@
 //! Must run on a host with: cage, pipewire, wireplumber, xdg-desktop-portal-wlr,
 //! GStreamer 1.28 + gstreamer1.0-pipewire, libwayland-dev, libpipewire-0.3-dev.
 //!
-//!   cargo test -p beam-agent --features wayland -- --ignored --test wayland_e2e --nocapture
+//!   cargo test -p beam-agent --features wayland --test wayland_e2e -- --ignored --nocapture
 //!
 //! Marked #[ignore] so normal CI (cargo test) never runs this.
 //! Gated #[cfg(feature = "wayland")] so default builds skip compilation entirely.
-//!
-//! Once A2 (WaylandDisplay::start()) lands, replace the manual cage spawn below
-//! with a call to WaylandDisplay::start() and update the teardown accordingly.
 
 #![cfg(feature = "wayland")]
 
-use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use beam_agent::wayland::WaylandCapture;
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const WAYLAND_DISPLAY: &str = "wayland-beam-test";
 const XDG_RUNTIME_DIR: &str = "/tmp/beam-xdg-test";
 const SOCKET_POLL_TIMEOUT: Duration = Duration::from_secs(5);
 const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const FRAME_BUDGET: Duration = Duration::from_secs(2);
 const MIN_FRAMES: usize = 10;
-/// Encoder resolution — small to keep startup fast.
 const WIDTH: u32 = 640;
 const HEIGHT: u32 = 480;
 const FRAMERATE: u32 = 30;
 const BITRATE: u32 = 1_000_000;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Spawn a cage compositor with a private Wayland socket.
+/// Spawn a headless cage compositor.
 ///
-/// cage needs at least one executable as its argument.  We pass `/bin/true`
-/// so it has something to run; cage keeps the compositor alive even after
-/// the child exits (it waits for the next client).
+/// cage 0.2.x ignores WAYLAND_DISPLAY as a compositor socket name; it picks
+/// its own name (wayland-0, wayland-1, ...) inside XDG_RUNTIME_DIR.
+/// cage also exits when its client exits, so we pass `sleep 120` as the
+/// client to keep the compositor alive for the test duration.
+///
+/// NOTE: `WaylandInput::new` mutates `WAYLAND_DISPLAY` via `unsafe set_var`.
+/// This test is single-process; that mutation is benign here but would race
+/// if tests ran in parallel with other tests reading the same env var.
 fn spawn_cage() -> Result<Child, String> {
-    // Ensure XDG_RUNTIME_DIR exists with correct permissions (0700).
     std::fs::create_dir_all(XDG_RUNTIME_DIR)
         .map_err(|e| format!("Failed to create XDG_RUNTIME_DIR {XDG_RUNTIME_DIR}: {e}"))?;
     std::fs::set_permissions(
@@ -71,14 +61,11 @@ fn spawn_cage() -> Result<Child, String> {
 
     Command::new("cage")
         .arg("--")
-        .arg("/bin/true")
-        .env("WAYLAND_DISPLAY", WAYLAND_DISPLAY)
+        .arg("/bin/sleep")
+        .arg("120")
         .env("XDG_RUNTIME_DIR", XDG_RUNTIME_DIR)
-        // Suppress cage's own rendering noise on headless hosts.
         .env("WLR_BACKENDS", "headless")
         .env("WLR_RENDERER", "pixman")
-        // Prevent cage from looking for a nested Wayland compositor.
-        .env_remove("WAYLAND_DISPLAY_PARENT")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -88,18 +75,35 @@ fn spawn_cage() -> Result<Child, String> {
         ))
 }
 
-/// Poll for the Wayland socket to appear (up to SOCKET_POLL_TIMEOUT).
-fn wait_for_socket() -> Result<(), String> {
-    let socket_path = format!("{XDG_RUNTIME_DIR}/{WAYLAND_DISPLAY}");
+/// Wait for cage's Wayland socket to appear in XDG_RUNTIME_DIR.
+///
+/// cage picks its own socket name (wayland-0 / wayland-1 / ...).
+/// Returns the actual socket name (e.g. "wayland-0") on success.
+fn wait_for_socket() -> Result<String, String> {
     let deadline = Instant::now() + SOCKET_POLL_TIMEOUT;
     while Instant::now() < deadline {
-        if Path::new(&socket_path).exists() {
-            return Ok(());
+        if let Ok(entries) = std::fs::read_dir(XDG_RUNTIME_DIR) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                // Wayland socket names look like "wayland-0", "wayland-1", etc.
+                if name_str.starts_with("wayland-")
+                    && !name_str.ends_with(".lock")
+                    && entry.path().exists()
+                {
+                    // Confirm it's a socket.
+                    if let Ok(meta) = entry.metadata() {
+                        if meta.file_type().is_socket() {
+                            return Ok(name_str.to_string());
+                        }
+                    }
+                }
+            }
         }
         std::thread::sleep(SOCKET_POLL_INTERVAL);
     }
     Err(format!(
-        "STEP 1 FAILED -- compositor socket never appeared at {socket_path} within {}s.\n\
+        "STEP 1 FAILED -- no wayland-* socket appeared in {XDG_RUNTIME_DIR} within {}s.\n\
          Likely causes:\n\
          - cage failed to start (check WLR_BACKENDS=headless, WLR_RENDERER=pixman)\n\
          - XDG_RUNTIME_DIR permissions wrong (needs 0700)\n\
@@ -108,40 +112,35 @@ fn wait_for_socket() -> Result<(), String> {
     ))
 }
 
-/// Terminate cage and clean up the XDG_RUNTIME_DIR.
 fn teardown(mut cage: Child) {
-    // SIGTERM the compositor; ignore errors (already dead is fine).
     let _ = cage.kill();
     let _ = cage.wait();
-    // Best-effort cleanup; leave no state for next run.
     let _ = std::fs::remove_dir_all(XDG_RUNTIME_DIR);
 }
-
-// ---------------------------------------------------------------------------
-// The test
-// ---------------------------------------------------------------------------
 
 #[test]
 #[ignore]
 fn wayland_capture_e2e() {
-    // STEP 1: spawn cage.
     eprintln!("[wayland_e2e] STEP 1: spawning cage compositor");
     let cage = match spawn_cage() {
         Ok(c) => c,
         Err(msg) => panic!("{msg}"),
     };
 
-    // Wait for socket readiness.
-    if let Err(msg) = wait_for_socket() {
-        teardown(cage);
-        panic!("{msg}");
-    }
-    eprintln!("[wayland_e2e] STEP 1 OK: socket {XDG_RUNTIME_DIR}/{WAYLAND_DISPLAY} is ready");
+    let wayland_display = match wait_for_socket() {
+        Ok(s) => s,
+        Err(msg) => {
+            teardown(cage);
+            panic!("{msg}");
+        }
+    };
+    eprintln!(
+        "[wayland_e2e] STEP 1 OK: socket {XDG_RUNTIME_DIR}/{wayland_display} is ready"
+    );
 
-    // STEP 2: open WaylandCapture (portal negotiation + pipeline start).
     eprintln!("[wayland_e2e] STEP 2: opening WaylandCapture (portal + pipewiresrc)");
     let capture = match WaylandCapture::new(
-        WAYLAND_DISPLAY,
+        &wayland_display,
         XDG_RUNTIME_DIR,
         WIDTH,
         HEIGHT,
@@ -168,12 +167,13 @@ fn wayland_capture_e2e() {
     };
     eprintln!("[wayland_e2e] STEP 2 OK: pipeline started");
 
-    // STEP 3: pull at least MIN_FRAMES encoded H.264 frames within FRAME_BUDGET.
-    eprintln!("[wayland_e2e] STEP 3: pulling >= {MIN_FRAMES} H.264 frames in {}s", FRAME_BUDGET.as_secs());
+    eprintln!(
+        "[wayland_e2e] STEP 3: pulling >= {MIN_FRAMES} H.264 frames in {}s",
+        FRAME_BUDGET.as_secs()
+    );
 
     let mut frame_count = 0usize;
     let mut total_bytes = 0usize;
-    // We track wall-clock timestamps of each successful pull to compute inter-frame gaps.
     let mut pull_times: Vec<Instant> = Vec::with_capacity(MIN_FRAMES + 4);
     let deadline = Instant::now() + FRAME_BUDGET;
 
@@ -199,7 +199,6 @@ fn wayland_capture_e2e() {
                 }
             }
             Ok(None) => {
-                // No frame ready yet; yield briefly.
                 std::thread::sleep(Duration::from_millis(5));
             }
             Err(e) => {
@@ -212,28 +211,27 @@ fn wayland_capture_e2e() {
         }
     }
 
-    // STEP 4: latency summary.
     if pull_times.len() >= 2 {
         let gaps: Vec<Duration> = pull_times
             .windows(2)
             .map(|w| w[1].duration_since(w[0]))
             .collect();
-        let avg_gap_ms = gaps.iter().map(|d| d.as_secs_f64() * 1000.0).sum::<f64>()
-            / gaps.len() as f64;
+        let avg_gap_ms =
+            gaps.iter().map(|d| d.as_secs_f64() * 1000.0).sum::<f64>() / gaps.len() as f64;
         let max_gap_ms = gaps
             .iter()
             .map(|d| d.as_secs_f64() * 1000.0)
             .fold(0.0_f64, f64::max);
         eprintln!(
-            "[wayland_e2e] STEP 4: latency summary -- {frame_count} frames, \
-             {total_bytes} bytes total, avg inter-frame gap {avg_gap_ms:.1} ms, \
-             max {max_gap_ms:.1} ms"
+            "[wayland_e2e] STEP 4: {frame_count} frames, {total_bytes} bytes total, \
+             avg inter-frame gap {avg_gap_ms:.1} ms, max {max_gap_ms:.1} ms"
         );
     } else {
-        eprintln!("[wayland_e2e] STEP 4: too few frames for latency summary ({frame_count} pulled)");
+        eprintln!(
+            "[wayland_e2e] STEP 4: too few frames for latency summary ({frame_count} pulled)"
+        );
     }
 
-    // STEP 5: assertion + teardown.
     teardown(cage);
 
     assert!(
@@ -250,7 +248,5 @@ fn wayland_capture_e2e() {
         FRAME_BUDGET.as_secs()
     );
 
-    eprintln!(
-        "[wayland_e2e] PASS: {frame_count} frames captured, {total_bytes} bytes encoded"
-    );
+    eprintln!("[wayland_e2e] PASS: {frame_count} frames captured, {total_bytes} bytes encoded");
 }

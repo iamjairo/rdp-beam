@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Beam remote desktop per-user agent"
 
+[lib]
+name = "beam_agent"
+path = "src/lib.rs"
+
 [[bin]]
 name = "beam-agent"
 path = "src/main.rs"
