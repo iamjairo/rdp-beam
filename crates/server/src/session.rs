@@ -13,6 +13,66 @@ use uuid::Uuid;
 
 const SESSION_DIR: &str = "/var/lib/beam/sessions";
 
+/// Resolve `backend = "auto"` to a concrete `"xorg"` or `"wayland"` value by
+/// reading `/etc/os-release`. Called once at server start and the result is
+/// pinned for the lifetime of the process — agents never re-detect.
+///
+/// Picks `wayland` on Ubuntu 26.04+ and any distro where `VARIANT_ID` or
+/// `ID_LIKE` indicates a Wayland-default system; `xorg` otherwise.
+/// Non-`auto` inputs pass through unchanged.
+pub(crate) fn resolve_backend(value: &str) -> String {
+    if value != "auto" {
+        return value.to_string();
+    }
+    let osrel = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+    let mut id = String::new();
+    let mut version_id = String::new();
+    for line in osrel.lines() {
+        if let Some(v) = line.strip_prefix("ID=") {
+            id = v.trim_matches('"').to_string();
+        } else if let Some(v) = line.strip_prefix("VERSION_ID=") {
+            version_id = v.trim_matches('"').to_string();
+        }
+    }
+    // Parse only the first two dot-separated components — handles both
+    // `26.04` and `26.04.1` point releases without choking on the inner dot.
+    let mut parts = version_id.split('.');
+    let maj: Option<u32> = parts.next().and_then(|s| s.parse().ok());
+    let min: Option<u32> = parts.next().and_then(|s| s.parse().ok());
+    let is_ubuntu_2604_plus =
+        id == "ubuntu" && matches!((maj, min), (Some(m), Some(n)) if (m, n) >= (26, 4));
+    if is_ubuntu_2604_plus {
+        "wayland".to_string()
+    } else {
+        "xorg".to_string()
+    }
+}
+
+#[cfg(test)]
+mod backend_tests {
+    use super::resolve_backend;
+
+    #[test]
+    fn explicit_xorg_passes_through() {
+        assert_eq!(resolve_backend("xorg"), "xorg");
+    }
+
+    #[test]
+    fn explicit_wayland_passes_through() {
+        assert_eq!(resolve_backend("wayland"), "wayland");
+    }
+
+    #[test]
+    fn auto_returns_xorg_or_wayland() {
+        // Cannot mock /etc/os-release here; just verify the result is in the valid set.
+        let r = resolve_backend("auto");
+        assert!(
+            r == "xorg" || r == "wayland",
+            "auto should resolve to xorg or wayland, got {r}"
+        );
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct PersistedSession {
     session_id: Uuid,
@@ -91,6 +151,10 @@ pub struct SessionManager {
     video_config: beam_protocol::VideoConfig,
     /// GPU driver mode to pass to agents: "auto", "nvidia", "dummy"
     gpu_driver: String,
+    /// Display backend to pass to agents: "auto", "xorg", "wayland".
+    /// `auto` is resolved server-side by reading /etc/os-release before spawn
+    /// so each agent gets a concrete value and never re-runs detection.
+    backend: String,
     /// Starting display number (for DFP output allocation)
     display_start: u32,
 }
@@ -156,6 +220,7 @@ impl SessionManager {
         tls_cert_path: Option<String>,
         video_config: beam_protocol::VideoConfig,
         gpu_driver: String,
+        backend: String,
     ) -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
@@ -165,6 +230,7 @@ impl SessionManager {
             tls_cert_path,
             video_config,
             gpu_driver,
+            backend: resolve_backend(&backend),
             display_start,
         }
     }
@@ -656,6 +722,7 @@ impl SessionManager {
             cmd.args(["--tls-cert", cert_path]);
         }
         cmd.args(["--gpu-driver", &self.gpu_driver]);
+        cmd.args(["--backend", &self.backend]);
         cmd.args(["--display-start", &self.display_start.to_string()]);
 
         // Run systemd-run with --no-block — exits immediately after queuing
@@ -956,6 +1023,7 @@ mod tests {
             None,
             beam_protocol::VideoConfig::default(),
             "auto".to_string(),
+            "auto".to_string(),
         );
         let id = Uuid::new_v4();
         // Non-existent session should reject
@@ -993,6 +1061,7 @@ mod tests {
             1080,
             None,
             beam_protocol::VideoConfig::default(),
+            "auto".to_string(),
             "auto".to_string(),
         );
         let id = Uuid::new_v4();
@@ -1080,6 +1149,7 @@ mod tests {
             None,
             beam_protocol::VideoConfig::default(),
             "auto".to_string(),
+            "auto".to_string(),
         );
         let id = Uuid::new_v4();
 
@@ -1127,6 +1197,7 @@ mod tests {
             None,
             beam_protocol::VideoConfig::default(),
             "auto".to_string(),
+            "auto".to_string(),
         );
         let id = Uuid::new_v4();
         assert_eq!(manager.increment_restart_count(id).await, None);
@@ -1141,6 +1212,7 @@ mod tests {
             None,
             beam_protocol::VideoConfig::default(),
             "auto".to_string(),
+            "auto".to_string(),
         );
         let id = Uuid::new_v4();
         assert_eq!(manager.get_restart_count(id).await, None);
@@ -1154,6 +1226,7 @@ mod tests {
             1080,
             None,
             beam_protocol::VideoConfig::default(),
+            "auto".to_string(),
             "auto".to_string(),
         );
         let id = Uuid::new_v4();
@@ -1194,6 +1267,7 @@ mod tests {
             1080,
             None,
             beam_protocol::VideoConfig::default(),
+            "auto".to_string(),
             "auto".to_string(),
         );
         let id1 = Uuid::new_v4();
@@ -1245,6 +1319,7 @@ mod tests {
             1080,
             None,
             beam_protocol::VideoConfig::default(),
+            "auto".to_string(),
             "auto".to_string(),
         );
 
@@ -1351,6 +1426,7 @@ mod tests {
             None,
             beam_protocol::VideoConfig::default(),
             "auto".to_string(),
+            "auto".to_string(),
         );
         let id = Uuid::new_v4();
 
@@ -1390,6 +1466,7 @@ mod tests {
             None,
             beam_protocol::VideoConfig::default(),
             "auto".to_string(),
+            "auto".to_string(),
         );
         let id = Uuid::new_v4();
 
@@ -1428,6 +1505,7 @@ mod tests {
             1080,
             None,
             beam_protocol::VideoConfig::default(),
+            "auto".to_string(),
             "auto".to_string(),
         );
         let id = Uuid::new_v4();

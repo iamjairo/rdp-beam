@@ -24,3 +24,4 @@ default_height = 1080
 display_start = 10
 max_sessions = 8
 # gpu_driver = "auto"  # "auto" (detect GPU), "nvidia" (force GPU), "dummy" (force software)
+# backend = "auto"     # "auto" (Wayland on Ubuntu 26.04+, Xorg elsewhere), "xorg", "wayland"

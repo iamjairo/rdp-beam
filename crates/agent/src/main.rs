@@ -13,15 +13,21 @@ mod h264;
 mod input;
 mod signaling;
 mod video;
+#[cfg(feature = "wayland")]
+mod wayland;
 
 use anyhow::Context;
-use audio::AudioCapture;
+use audio::XorgAudio;
 use beam_protocol::InputEvent;
-use capture::ScreenCapture;
+// `ScreenCaptureBackend` brings `capture_frame` into scope. The other
+// backend traits' methods are also available on the concrete Xorg* types
+// as inherent methods, so no trait import is needed for them in the
+// default (non-wayland) build.
+use capture::{ScreenCaptureBackend, XorgCapture};
 use cli::DEFAULT_FRAMERATE;
 use clipboard::ClipboardBridge;
 use encoder::Encoder;
-use input::InputInjector;
+use input::XorgInput;
 use signaling::SignalingCtx;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -44,7 +50,7 @@ pub(crate) enum CaptureCommand {
 
 /// Shared context for building the input event callback.
 struct InputCallbackCtx {
-    injector: Arc<Mutex<InputInjector>>,
+    injector: Arc<Mutex<XorgInput>>,
     clipboard: Arc<Mutex<ClipboardBridge>>,
     file_transfer: Arc<Mutex<filetransfer::FileTransferManager>>,
     resize_tx: mpsc::Sender<(u32, u32)>,
@@ -335,15 +341,47 @@ async fn main() -> anyhow::Result<()> {
         display = %args.display,
         session_id = %args.session_id,
         server_url = %args.server_url,
+        backend = %args.backend,
         "Starting beam-agent"
     );
+
+    // Validate backend and fail fast for unimplemented paths.
+    // The Wayland runtime path is not yet wired up; bail with a clear message
+    // rather than silently degrading to Xorg, which would hide a
+    // misconfiguration on a 26.04 host.
+    match args.backend.as_str() {
+        "xorg" => {} // continue below
+        "wayland" => {
+            #[cfg(feature = "wayland")]
+            {
+                // Delegate to the Wayland stub — it bails with the same message.
+                wayland::WaylandDisplay::start(wayland::WaylandDisplayConfig {
+                    display_num: 0,
+                    width: 0,
+                    height: 0,
+                })?;
+            }
+            #[cfg(not(feature = "wayland"))]
+            anyhow::bail!(
+                "backend = \"wayland\" is not yet implemented in beam-agent. \
+                 Set `[session] backend = \"xorg\"` in /etc/beam/beam.toml as a workaround. \
+                 Tracking issue: https://github.com/frecar/beam/issues (wayland backend)"
+            );
+        }
+        other => {
+            anyhow::bail!(
+                "Unknown backend '{}'. Expected one of: xorg, wayland, auto.",
+                other
+            );
+        }
+    }
 
     // PulseAudio server path — derived from display number regardless of new/existing display
     let mut pulse_server: Option<String> = None;
     let display_num: u32 = args.display.trim_start_matches(':').parse().unwrap_or(10);
 
     // Try to connect to the display; if it doesn't exist, start a virtual one
-    let mut virtual_display = match ScreenCapture::new(&args.display) {
+    let mut virtual_display = match XorgCapture::new(&args.display) {
         Ok(_) => {
             info!(display = %args.display, "Connected to existing display");
             // Session reuse: PulseAudio should already be running for this display
@@ -358,7 +396,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Err(e) => {
             warn!(display = %args.display, "Display not available ({e:#}), starting virtual display");
-            match display::VirtualDisplay::start(
+            match display::XorgVirtualDisplay::start(
                 display_num,
                 args.width,
                 args.height,
@@ -404,7 +442,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Create screen capture (now the display should be available)
     let mut screen_capture =
-        ScreenCapture::new(&args.display).context("Failed to initialize screen capture")?;
+        XorgCapture::new(&args.display).context("Failed to initialize screen capture")?;
     let width = screen_capture.width();
     let height = screen_capture.height();
 
@@ -460,7 +498,7 @@ async fn main() -> anyhow::Result<()> {
     let input_width = Arc::new(std::sync::atomic::AtomicU32::new(args.width));
     let input_height = Arc::new(std::sync::atomic::AtomicU32::new(args.height));
     let injector = Arc::new(Mutex::new(
-        InputInjector::new(
+        XorgInput::new(
             &args.display,
             Arc::clone(&input_width),
             Arc::clone(&input_height),
@@ -627,7 +665,7 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
 
-                            let new_capture = match ScreenCapture::new(&display_for_capture) {
+                            let new_capture = match XorgCapture::new(&display_for_capture) {
                                 Ok(cap) => cap,
                                 Err(e) => {
                                     error!("Failed to recreate capture after resize: {e:#}");
@@ -902,7 +940,7 @@ async fn main() -> anyhow::Result<()> {
                 if shutdown_for_audio.load(Ordering::Relaxed) {
                     return;
                 }
-                match AudioCapture::new(48000, 2, pulse_server_clone.as_deref()) {
+                match XorgAudio::new(48000, 2, pulse_server_clone.as_deref()) {
                     Ok(capture) => {
                         info!(attempt, "Audio capture initialized");
                         audio_capture = Some(capture);

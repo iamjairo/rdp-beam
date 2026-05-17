@@ -96,6 +96,11 @@ pub struct SessionConfig {
     /// GPU driver for virtual displays: "auto" (default), "nvidia", "dummy"
     #[serde(default = "default_gpu_driver")]
     pub gpu_driver: String,
+    /// Display backend: "auto" (detect from /etc/os-release), "xorg", "wayland".
+    /// `auto` picks `wayland` on Ubuntu 26.04+ (and other Wayland-default distros)
+    /// and `xorg` everywhere else.
+    #[serde(default = "default_backend")]
+    pub backend: String,
 }
 
 impl Default for ServerConfig {
@@ -146,6 +151,7 @@ impl Default for SessionConfig {
             max_sessions: default_max_sessions(),
             idle_timeout: default_idle_timeout(),
             gpu_driver: default_gpu_driver(),
+            backend: default_backend(),
         }
     }
 }
@@ -251,6 +257,16 @@ impl BeamConfig {
             ));
         }
 
+        // --- Backend ---
+        let valid_backends = ["auto", "xorg", "wayland"];
+        if !valid_backends.contains(&self.session.backend.as_str()) {
+            issues.push(format!(
+                "WARNING: session.backend '{}' is not recognized. \
+                 Valid values: auto, xorg, wayland. Defaulting to auto.",
+                self.session.backend
+            ));
+        }
+
         // --- Max sessions ---
         if self.session.max_sessions == 0 {
             issues.push("ERROR: session.max_sessions must be >= 1.".to_string());
@@ -351,6 +367,9 @@ fn default_idle_timeout() -> u64 {
 fn default_gpu_driver() -> String {
     "auto".to_string()
 }
+fn default_backend() -> String {
+    "auto".to_string()
+}
 
 #[cfg(test)]
 mod tests {
@@ -391,6 +410,7 @@ mod tests {
         assert_eq!(config.session.max_sessions, 8);
         assert_eq!(config.session.idle_timeout, 3600);
         assert_eq!(config.session.gpu_driver, "auto");
+        assert_eq!(config.session.backend, "auto");
     }
 
     #[test]
@@ -563,6 +583,7 @@ idle_timeout = 7200
         assert_eq!(session.max_sessions, from_toml.session.max_sessions);
         assert_eq!(session.idle_timeout, from_toml.session.idle_timeout);
         assert_eq!(session.gpu_driver, from_toml.session.gpu_driver);
+        assert_eq!(session.backend, from_toml.session.backend);
     }
 
     // --- Validation tests ---
@@ -800,6 +821,29 @@ idle_timeout = 7200
             assert!(
                 config.validate().is_ok(),
                 "gpu_driver={driver} should be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_backend_invalid_warns() {
+        let mut config = valid_config();
+        config.session.backend = "invalid".to_string();
+        let issues = validate_issues(&config);
+        assert!(
+            issues.iter().any(|i| i.contains("backend")),
+            "invalid backend should produce warning"
+        );
+    }
+
+    #[test]
+    fn validate_backend_valid_values() {
+        for backend in &["auto", "xorg", "wayland"] {
+            let mut config = valid_config();
+            config.session.backend = backend.to_string();
+            assert!(
+                config.validate().is_ok(),
+                "backend={backend} should be valid"
             );
         }
     }

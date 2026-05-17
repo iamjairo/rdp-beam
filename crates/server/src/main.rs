@@ -177,6 +177,7 @@ async fn main() -> Result<()> {
         Some(tls_cert_path),
         config.video.clone(),
         config.session.gpu_driver.clone(),
+        config.session.backend.clone(),
     );
 
     // Build app state and router

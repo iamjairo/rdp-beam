@@ -1456,6 +1456,7 @@ mod tests {
             None,
             beam_protocol::VideoConfig::default(),
             "auto".to_string(),
+            "auto".to_string(),
         );
         Arc::new(AppState {
             config,
@@ -1858,6 +1859,7 @@ mod tests {
             1080,
             None,
             beam_protocol::VideoConfig::default(),
+            "auto".to_string(),
             "auto".to_string(),
         );
         let state = Arc::new(AppState {

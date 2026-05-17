@@ -19,6 +19,11 @@ pub(crate) struct Args {
     pub max_height: u32,
     pub gpu_driver: String,
     pub display_start: u32,
+    /// Display backend: "xorg" (X11 dummy/nvidia) or "wayland" (headless wlroots compositor).
+    /// "auto" is resolved here by reading /etc/os-release; the server normally passes
+    /// an already-resolved value, but the agent must also handle the unresolved case
+    /// to stay testable in isolation.
+    pub backend: String,
 }
 
 pub(crate) fn parse_args() -> anyhow::Result<Args> {
@@ -36,6 +41,7 @@ pub(crate) fn parse_args() -> anyhow::Result<Args> {
     let mut max_height: u32 = 2160;
     let mut gpu_driver = "auto".to_string();
     let mut display_start: u32 = 10;
+    let mut backend = "auto".to_string();
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -74,6 +80,9 @@ pub(crate) fn parse_args() -> anyhow::Result<Args> {
                 println!("    --max-height <PIXELS>        Maximum resize height [default: 2160]");
                 println!(
                     "    --gpu-driver <MODE>          GPU driver: auto, nvidia, dummy [default: auto]"
+                );
+                println!(
+                    "    --backend <MODE>             Display backend: auto, xorg, wayland [default: auto]"
                 );
                 println!("    --display-start <N>          Starting display number [default: 10]");
                 println!("    -V, --version                Print version and exit");
@@ -162,6 +171,10 @@ pub(crate) fn parse_args() -> anyhow::Result<Args> {
                 i += 1;
                 gpu_driver = args.get(i).context("Missing --gpu-driver value")?.clone();
             }
+            "--backend" => {
+                i += 1;
+                backend = args.get(i).context("Missing --backend value")?.clone();
+            }
             "--display-start" => {
                 i += 1;
                 display_start = args
@@ -180,6 +193,8 @@ pub(crate) fn parse_args() -> anyhow::Result<Args> {
         agent_token = std::env::var("BEAM_AGENT_TOKEN").ok();
     }
 
+    let resolved_backend = resolve_backend(&backend);
+
     Ok(Args {
         display,
         server_url,
@@ -195,5 +210,61 @@ pub(crate) fn parse_args() -> anyhow::Result<Args> {
         max_height,
         gpu_driver,
         display_start,
+        backend: resolved_backend,
     })
+}
+
+/// Resolve `backend = "auto"` to a concrete `"xorg"` or `"wayland"` based on
+/// `/etc/os-release`. Mirrors the server-side logic in
+/// `crates/server/src/session.rs::resolve_backend` so the agent stays
+/// runnable standalone (manual `beam-agent` invocation, integration tests,
+/// future single-binary deployments).
+///
+/// Non-`auto` inputs pass through unchanged. Anything other than
+/// `auto`/`xorg`/`wayland` is left alone so the dispatcher in `main.rs`
+/// can produce a clear error.
+fn resolve_backend(value: &str) -> String {
+    if value != "auto" {
+        return value.to_string();
+    }
+    let osrel = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+    let mut id = String::new();
+    let mut version_id = String::new();
+    for line in osrel.lines() {
+        if let Some(v) = line.strip_prefix("ID=") {
+            id = v.trim_matches('"').to_string();
+        } else if let Some(v) = line.strip_prefix("VERSION_ID=") {
+            version_id = v.trim_matches('"').to_string();
+        }
+    }
+    // Parse only the first two dot-separated components — handles both
+    // `26.04` and `26.04.1` point releases without choking on the inner dot.
+    let mut parts = version_id.split('.');
+    let maj: Option<u32> = parts.next().and_then(|s| s.parse().ok());
+    let min: Option<u32> = parts.next().and_then(|s| s.parse().ok());
+    let is_ubuntu_2604_plus =
+        id == "ubuntu" && matches!((maj, min), (Some(m), Some(n)) if (m, n) >= (26, 4));
+    if is_ubuntu_2604_plus {
+        "wayland".to_string()
+    } else {
+        "xorg".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_backend;
+
+    #[test]
+    fn explicit_passes_through() {
+        assert_eq!(resolve_backend("xorg"), "xorg");
+        assert_eq!(resolve_backend("wayland"), "wayland");
+        assert_eq!(resolve_backend("garbage"), "garbage");
+    }
+
+    #[test]
+    fn auto_resolves_to_known_value() {
+        let r = resolve_backend("auto");
+        assert!(r == "xorg" || r == "wayland");
+    }
 }
