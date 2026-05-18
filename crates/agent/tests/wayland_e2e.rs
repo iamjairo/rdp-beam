@@ -1,21 +1,23 @@
 //! Wayland end-to-end integration test for the Beam agent.
 //!
 //! # What this covers
-//! - cage compositor spawn + socket readiness
-//! - WaylandCapture::new() portal negotiation (xdg-desktop-portal-wlr via gdbus)
-//! - GStreamer pipewiresrc -> H.264 encoder pipeline
-//! - Pulling >= 10 encoded H.264 frames within 2 seconds
+//! - `WaylandDisplay::start()` end-to-end: cage compositor + per-session
+//!   `dbus-daemon --session` + `xdg-desktop-portal-wlr`
+//! - `WaylandCapture::new()` portal negotiation (gdbus → ScreenCast)
+//! - GStreamer pipewiresrc → H.264 encoder pipeline
+//! - Pulling ≥ 10 encoded H.264 frames within 2 seconds
 //! - Inter-frame timing summary (avg gap between pull() calls that returned data)
-//! - Clean teardown: SIGTERM cage, remove XDG_RUNTIME_DIR
+//! - Clean teardown: drop tears down portal, bus, compositor and removes XDG_RUNTIME_DIR
 //!
 //! # What this does NOT cover
-//! - Virtual input (A4 stubs bail) -- excluded by design
-//! - Audio capture (A5 stubs bail) -- excluded by design
-//! - Real desktop rendering inside cage -- empty compositor is sufficient
+//! - Virtual input — not exercised here, see input.rs unit tests for shape
+//! - Audio capture — `WaylandAudio` lives in its own test path
+//! - Real desktop rendering inside cage — empty compositor is sufficient
 //!
 //! # How to run
-//! Must run on a host with: cage, pipewire, wireplumber, xdg-desktop-portal-wlr,
-//! GStreamer 1.28 + gstreamer1.0-pipewire, libwayland-dev, libpipewire-0.3-dev.
+//! Must run on a host with: cage, dbus-daemon, xdg-desktop-portal-wlr,
+//! pipewire, wireplumber, GStreamer 1.28 + gstreamer1.0-pipewire,
+//! libwayland-dev, libpipewire-0.3-dev, gdbus (from libglib2.0-bin).
 //!
 //!   cargo test -p beam-agent --features wayland --test wayland_e2e -- --ignored --nocapture
 //!
@@ -24,15 +26,10 @@
 
 #![cfg(feature = "wayland")]
 
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use beam_agent::wayland::WaylandCapture;
+use beam_agent::wayland::{WaylandCapture, WaylandDisplay, WaylandDisplayConfig};
 
-const XDG_RUNTIME_DIR: &str = "/tmp/beam-xdg-test";
-const SOCKET_POLL_TIMEOUT: Duration = Duration::from_secs(5);
-const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const FRAME_BUDGET: Duration = Duration::from_secs(2);
 const MIN_FRAMES: usize = 10;
 const WIDTH: u32 = 640;
@@ -40,105 +37,44 @@ const HEIGHT: u32 = 480;
 const FRAMERATE: u32 = 30;
 const BITRATE: u32 = 1_000_000;
 
-/// Spawn a headless cage compositor.
-///
-/// cage 0.2.x ignores WAYLAND_DISPLAY as a compositor socket name; it picks
-/// its own name (wayland-0, wayland-1, ...) inside XDG_RUNTIME_DIR.
-/// cage also exits when its client exits, so we pass `sleep 120` as the
-/// client to keep the compositor alive for the test duration.
-///
-/// NOTE: `WaylandInput::new` mutates `WAYLAND_DISPLAY` via `unsafe set_var`.
-/// This test is single-process; that mutation is benign here but would race
-/// if tests ran in parallel with other tests reading the same env var.
-fn spawn_cage() -> Result<Child, String> {
-    std::fs::create_dir_all(XDG_RUNTIME_DIR)
-        .map_err(|e| format!("Failed to create XDG_RUNTIME_DIR {XDG_RUNTIME_DIR}: {e}"))?;
-    std::fs::set_permissions(XDG_RUNTIME_DIR, std::fs::Permissions::from_mode(0o700))
-        .map_err(|e| format!("Failed to chmod XDG_RUNTIME_DIR: {e}"))?;
-
-    Command::new("cage")
-        .arg("--")
-        .arg("/bin/sleep")
-        .arg("120")
-        .env("XDG_RUNTIME_DIR", XDG_RUNTIME_DIR)
-        .env("WLR_BACKENDS", "headless")
-        .env("WLR_RENDERER", "pixman")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| {
-            format!(
-                "STEP 1 FAILED -- compositor spawn: cage not found or spawn error: {e}\n\
-             Fix: apt-get install cage"
-            )
-        })
-}
-
-/// Wait for cage's Wayland socket to appear in XDG_RUNTIME_DIR.
-///
-/// cage picks its own socket name (wayland-0 / wayland-1 / ...).
-/// Returns the actual socket name (e.g. "wayland-0") on success.
-fn wait_for_socket() -> Result<String, String> {
-    let deadline = Instant::now() + SOCKET_POLL_TIMEOUT;
-    while Instant::now() < deadline {
-        if let Ok(entries) = std::fs::read_dir(XDG_RUNTIME_DIR) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                // Wayland socket names look like "wayland-0", "wayland-1", etc.
-                if name_str.starts_with("wayland-")
-                    && !name_str.ends_with(".lock")
-                    && entry.path().exists()
-                {
-                    // Confirm it's a socket.
-                    if let Ok(meta) = entry.metadata() {
-                        if meta.file_type().is_socket() {
-                            return Ok(name_str.to_string());
-                        }
-                    }
-                }
-            }
-        }
-        std::thread::sleep(SOCKET_POLL_INTERVAL);
-    }
-    Err(format!(
-        "STEP 1 FAILED -- no wayland-* socket appeared in {XDG_RUNTIME_DIR} within {}s.\n\
-         Likely causes:\n\
-         - cage failed to start (check WLR_BACKENDS=headless, WLR_RENDERER=pixman)\n\
-         - XDG_RUNTIME_DIR permissions wrong (needs 0700)\n\
-         - Missing headless backend: apt-get install libwlroots-dev",
-        SOCKET_POLL_TIMEOUT.as_secs()
-    ))
-}
-
-fn teardown(mut cage: Child) {
-    let _ = cage.kill();
-    let _ = cage.wait();
-    let _ = std::fs::remove_dir_all(XDG_RUNTIME_DIR);
+/// Unique display number per test process so concurrent runs don't collide
+/// on `/tmp/beam-xdg-{N}`. Caps at 999 so the dir name stays short.
+fn pick_display_num() -> u32 {
+    900 + (std::process::id() % 100)
 }
 
 #[test]
 #[ignore]
 fn wayland_capture_e2e() {
-    eprintln!("[wayland_e2e] STEP 1: spawning cage compositor");
-    let cage = match spawn_cage() {
-        Ok(c) => c,
-        Err(msg) => panic!("{msg}"),
+    let display_num = pick_display_num();
+    eprintln!(
+        "[wayland_e2e] STEP 1: starting WaylandDisplay (cage + dbus-daemon + xdg-desktop-portal-wlr) on display {display_num}"
+    );
+    let display = match WaylandDisplay::start(WaylandDisplayConfig {
+        display_num,
+        width: WIDTH,
+        height: HEIGHT,
+    }) {
+        Ok(d) => d,
+        Err(e) => panic!(
+            "STEP 1 FAILED -- WaylandDisplay::start error: {e:#}\n\
+             Likely causes:\n\
+             - cage not installed: apt-get install cage\n\
+             - dbus-daemon not installed: apt-get install dbus\n\
+             - xdg-desktop-portal-wlr not installed: apt-get install xdg-desktop-portal-wlr\n\
+             - gdbus not in PATH: apt-get install libglib2.0-bin"
+        ),
     };
+    let wayland_display = display.wayland_display().to_string();
+    let xdg_runtime_dir = display.xdg_runtime_dir().to_string();
+    eprintln!(
+        "[wayland_e2e] STEP 1 OK: compositor socket {xdg_runtime_dir}/{wayland_display}, portal on bus"
+    );
 
-    let wayland_display = match wait_for_socket() {
-        Ok(s) => s,
-        Err(msg) => {
-            teardown(cage);
-            panic!("{msg}");
-        }
-    };
-    eprintln!("[wayland_e2e] STEP 1 OK: socket {XDG_RUNTIME_DIR}/{wayland_display} is ready");
-
-    eprintln!("[wayland_e2e] STEP 2: opening WaylandCapture (portal + pipewiresrc)");
+    eprintln!("[wayland_e2e] STEP 2: opening WaylandCapture (gdbus → ScreenCast)");
     let capture = match WaylandCapture::new(
         &wayland_display,
-        XDG_RUNTIME_DIR,
+        &xdg_runtime_dir,
         WIDTH,
         HEIGHT,
         FRAMERATE,
@@ -146,21 +82,13 @@ fn wayland_capture_e2e() {
         None,
     ) {
         Ok(c) => c,
-        Err(e) => {
-            teardown(cage);
-            panic!(
-                "STEP 2 FAILED -- WaylandCapture::new() error: {e:#}\n\
-                 Likely causes:\n\
-                 - xdg-desktop-portal-wlr not running on this session bus\n\
-                   Fix: systemctl --user start xdg-desktop-portal-wlr\n\
-                 - pipewiresrc GStreamer element missing\n\
-                   Fix: apt-get install gstreamer1.0-pipewire\n\
-                 - pipewire/wireplumber not running\n\
-                   Fix: systemctl --user start pipewire pipewire-pulse wireplumber\n\
-                 - gdbus not in PATH\n\
-                   Fix: apt-get install libglib2.0-bin"
-            );
-        }
+        Err(e) => panic!(
+            "STEP 2 FAILED -- WaylandCapture::new() error: {e:#}\n\
+             Likely causes:\n\
+             - pipewiresrc GStreamer element missing: apt-get install gstreamer1.0-pipewire\n\
+             - pipewire/wireplumber not running: systemctl --user start pipewire wireplumber\n\
+             - portal session bus address mismatch (verify dbus-daemon child is alive)"
+        ),
     };
     eprintln!("[wayland_e2e] STEP 2 OK: pipeline started");
 
@@ -174,12 +102,8 @@ fn wayland_capture_e2e() {
     let mut pull_times: Vec<Instant> = Vec::with_capacity(MIN_FRAMES + 4);
     let deadline = Instant::now() + FRAME_BUDGET;
 
-    loop {
-        if Instant::now() >= deadline {
-            break;
-        }
+    while Instant::now() < deadline {
         if capture.has_error() {
-            teardown(cage);
             panic!(
                 "STEP 3 FAILED -- pipeline error after {frame_count} frames.\n\
                  Likely cause: PipeWire node dropped (compositor or portal died).\n\
@@ -198,13 +122,10 @@ fn wayland_capture_e2e() {
             Ok(None) => {
                 std::thread::sleep(Duration::from_millis(5));
             }
-            Err(e) => {
-                teardown(cage);
-                panic!(
-                    "STEP 3 FAILED -- pull_encoded() returned error after {frame_count} frames: {e:#}\n\
-                     Likely cause: GStreamer pipeline disconnected."
-                );
-            }
+            Err(e) => panic!(
+                "STEP 3 FAILED -- pull_encoded() error after {frame_count} frames: {e:#}\n\
+                 Likely cause: GStreamer pipeline disconnected."
+            ),
         }
     }
 
@@ -229,7 +150,8 @@ fn wayland_capture_e2e() {
         );
     }
 
-    teardown(cage);
+    drop(capture);
+    drop(display);
 
     assert!(
         frame_count >= MIN_FRAMES,

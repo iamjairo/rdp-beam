@@ -62,6 +62,19 @@ pub struct WaylandDisplay {
     display_num: u32,
     /// Compositor child (`cage` or `sway --backend=headless`).
     compositor_child: Child,
+    /// Per-session `dbus-daemon --session` bound to `$XDG_RUNTIME_DIR/bus`.
+    /// Required by `xdg-desktop-portal-wlr`, which only exposes a
+    /// session-bus interface — we need an isolated bus per agent session
+    /// since the agent's compositor and portal must not be reachable from
+    /// the user's main desktop session bus.
+    bus_child: Child,
+    /// `xdg-desktop-portal-wlr` backend bound to `bus_child`. Owns
+    /// `org.freedesktop.impl.portal.desktop.wlr` on the session bus.
+    portal_backend_child: Child,
+    /// `xdg-desktop-portal` umbrella daemon. Owns the user-facing
+    /// `org.freedesktop.portal.Desktop` name and routes ScreenCast
+    /// requests to the wlr backend.
+    portal_child: Child,
     /// Optional desktop session spawned by `start_desktop()`.
     desktop_child: Option<Child>,
     /// Optional PulseAudio child spawned by `start_pulseaudio()`.
@@ -121,6 +134,41 @@ impl WaylandDisplay {
                 })?;
         }
 
+        // xdg-desktop-portal-wlr's screencast path requires a PipeWire
+        // daemon socket inside XDG_RUNTIME_DIR (the client searches for
+        // `$XDG_RUNTIME_DIR/pipewire-0`). Per-session PipeWire is the
+        // strictly-correct architecture for production multi-tenant hosts
+        // but is significant additional plumbing. As a pragmatic bridge,
+        // symlink the agent user's existing PipeWire socket into our
+        // isolated runtime dir. The dev-host smoke test uses this path.
+        #[cfg(unix)]
+        if let Some(uid) = real_uid() {
+            let user_pw_sock = PathBuf::from(format!("/run/user/{uid}/pipewire-0"));
+            if user_pw_sock.exists() {
+                let target = xdg_runtime_dir.join("pipewire-0");
+                let _ = std::fs::remove_file(&target);
+                if let Err(e) = std::os::unix::fs::symlink(&user_pw_sock, &target) {
+                    warn!(
+                        from = %user_pw_sock.display(),
+                        to = %target.display(),
+                        error = %e,
+                        "failed to symlink pipewire socket; portal screencast will fail"
+                    );
+                } else {
+                    info!(
+                        from = %user_pw_sock.display(),
+                        to = %target.display(),
+                        "linked user's pipewire socket into session runtime dir"
+                    );
+                }
+            } else {
+                warn!(
+                    user_pw_sock = %user_pw_sock.display(),
+                    "user PipeWire socket missing; portal screencast will fail until per-session pipewire lands"
+                );
+            }
+        }
+
         // Resolve compositor binary. Default `cage`; override via env for ops.
         let compositor_choice =
             std::env::var("BEAM_WAYLAND_COMPOSITOR").unwrap_or_else(|_| "cage".into());
@@ -158,9 +206,12 @@ impl WaylandDisplay {
         cmd.env("WAYLAND_DISPLAY", &wayland_display)
             .env("XDG_RUNTIME_DIR", &xdg_runtime_dir)
             .env("XDG_SESSION_TYPE", "wayland")
-            // Some compositor builds spam stderr with informational logs;
-            // route to /dev/null but keep stdout for diagnostic info if the
-            // child writes anything fatal.
+            // Force wlroots into a headless, software-rendered backend.
+            // Without these, cage/sway try DRM/X11 backends that don't
+            // exist on a headless server box and exit ~immediately.
+            .env("WLR_BACKENDS", "headless")
+            .env("WLR_RENDERER", "pixman")
+            .env("WLR_LIBINPUT_NO_DEVICES", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -169,48 +220,189 @@ impl WaylandDisplay {
             .spawn()
             .with_context(|| format!("failed to spawn `{compositor_choice}`"))?;
 
-        // Wait for the socket to appear. Up to 5 seconds.
-        let socket_path = xdg_runtime_dir.join(&wayland_display);
+        // Wait for any `wayland-*` socket to appear in XDG_RUNTIME_DIR.
+        // Cage 0.2.x ignores the WAYLAND_DISPLAY env we set and picks its
+        // own name (wayland-0, wayland-1, …) — so we discover the actual
+        // socket name post-spawn rather than pre-deciding it.
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut display = WaylandDisplay {
-            display_num,
-            compositor_child: child,
-            desktop_child: None,
-            pulse_child: None,
-            xdg_runtime_dir: xdg_runtime_dir.clone(),
-            wayland_display,
-            output_name,
-        };
+        let mut compositor_child = child;
 
-        while Instant::now() < deadline {
-            if socket_path.exists() {
-                info!(
-                    socket = %socket_path.display(),
-                    "Wayland socket ready"
-                );
-                return Ok(display);
+        let discovered_socket = loop {
+            match scan_for_wayland_socket(&xdg_runtime_dir) {
+                Ok(Some(name)) => break Some(name),
+                Ok(None) => {}
+                Err(e) => warn!(error = %e, "scan_for_wayland_socket failed; will retry"),
             }
-            // Detect early compositor death so we don't spin for 5s.
-            match display.compositor_child.try_wait() {
+            match compositor_child.try_wait() {
                 Ok(Some(status)) => {
                     anyhow::bail!(
-                        "compositor `{compositor_choice}` exited early with status {status} before the socket appeared at {}",
-                        socket_path.display()
+                        "compositor `{compositor_choice}` exited early with status {status} before any wayland-* socket appeared in {}",
+                        xdg_runtime_dir.display()
                     );
                 }
-                Ok(None) => {} // still running
+                Ok(None) => {}
                 Err(e) => warn!(error = %e, "try_wait on compositor child failed"),
             }
+            if Instant::now() >= deadline {
+                break None;
+            }
             std::thread::sleep(Duration::from_millis(100));
-        }
+        };
 
-        // Timed out — kill the child before returning Err so we don't leak it.
-        let _ = display.compositor_child.kill();
-        let _ = display.compositor_child.wait();
-        anyhow::bail!(
-            "compositor `{compositor_choice}` did not create Wayland socket {} within 5s",
-            socket_path.display()
-        );
+        let wayland_display = match discovered_socket {
+            Some(s) => s,
+            None => {
+                let _ = compositor_child.kill();
+                let _ = compositor_child.wait();
+                anyhow::bail!(
+                    "compositor `{compositor_choice}` did not create a wayland-* socket in {} within 5s",
+                    xdg_runtime_dir.display()
+                );
+            }
+        };
+        let socket_path = xdg_runtime_dir.join(&wayland_display);
+        info!(socket = %socket_path.display(), "Wayland socket ready");
+
+        // -- Per-session D-Bus daemon ----------------------------------------
+        // `xdg-desktop-portal-wlr` requires a session bus, and we want it
+        // isolated from the operator's desktop session bus. Bind dbus-daemon
+        // to a unix socket inside the same XDG_RUNTIME_DIR so the portal and
+        // gdbus calls from `WaylandCapture` find it the same way.
+        let bus_socket = xdg_runtime_dir.join("bus");
+        let bus_addr = format!("unix:path={}", bus_socket.display());
+        let mut bus_cmd = Command::new("dbus-daemon");
+        bus_cmd
+            .args([
+                "--session",
+                "--nofork",
+                "--nopidfile",
+                "--nosyslog",
+                &format!("--address={bus_addr}"),
+            ])
+            .env("XDG_RUNTIME_DIR", &xdg_runtime_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let bus_child = match bus_cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = compositor_child.kill();
+                let _ = compositor_child.wait();
+                return Err(anyhow::Error::from(e).context(
+                    "failed to spawn dbus-daemon for Wayland session (install `dbus-daemon`)",
+                ));
+            }
+        };
+
+        if let Err(e) = wait_for_socket(&bus_socket, Duration::from_secs(3)) {
+            let _ = compositor_child.kill();
+            let _ = compositor_child.wait();
+            let mut bc = bus_child;
+            let _ = bc.kill();
+            let _ = bc.wait();
+            return Err(e.context("dbus-daemon did not create session bus socket"));
+        }
+        info!(bus = %bus_socket.display(), "Per-session dbus-daemon ready");
+
+        // -- xdg-desktop-portal-wlr backend ----------------------------------
+        // The wlr binary is a *backend*: it owns
+        // `org.freedesktop.impl.portal.desktop.wlr`, not the user-facing
+        // `org.freedesktop.portal.Desktop` name. It proxies wlr-screencopy
+        // to a PipeWire node. Distro packaging installs it under
+        // /usr/libexec, so it isn't in $PATH — use the absolute path.
+        let portal_env: [(&str, &std::ffi::OsStr); 5] = [
+            ("WAYLAND_DISPLAY", std::ffi::OsStr::new(&wayland_display)),
+            ("XDG_RUNTIME_DIR", xdg_runtime_dir.as_os_str()),
+            ("XDG_SESSION_TYPE", std::ffi::OsStr::new("wayland")),
+            ("XDG_CURRENT_DESKTOP", std::ffi::OsStr::new("wlroots")),
+            ("DBUS_SESSION_BUS_ADDRESS", std::ffi::OsStr::new(&bus_addr)),
+        ];
+        let mut backend_cmd = Command::new("/usr/libexec/xdg-desktop-portal-wlr");
+        for (k, v) in &portal_env {
+            backend_cmd.env(k, v);
+        }
+        backend_cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(
+                std::fs::File::create(format!("/tmp/beam-portal-wlr-{display_num}.log"))
+                    .map(Stdio::from)
+                    .unwrap_or_else(|_| Stdio::null()),
+            );
+        let portal_backend_child = match backend_cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = compositor_child.kill();
+                let _ = compositor_child.wait();
+                let mut bc = bus_child;
+                let _ = bc.kill();
+                let _ = bc.wait();
+                return Err(anyhow::Error::from(e).context(
+                    "failed to spawn /usr/libexec/xdg-desktop-portal-wlr (install `xdg-desktop-portal-wlr`)",
+                ));
+            }
+        };
+
+        // -- xdg-desktop-portal umbrella -------------------------------------
+        // Owns `org.freedesktop.portal.Desktop` and routes ScreenCast to
+        // the wlr backend above. Reads $XDG_CURRENT_DESKTOP to decide.
+        let mut umbrella_cmd = Command::new("/usr/libexec/xdg-desktop-portal");
+        for (k, v) in &portal_env {
+            umbrella_cmd.env(k, v);
+        }
+        umbrella_cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(
+                std::fs::File::create(format!("/tmp/beam-portal-umbrella-{display_num}.log"))
+                    .map(Stdio::from)
+                    .unwrap_or_else(|_| Stdio::null()),
+            );
+        let portal_child = match umbrella_cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = compositor_child.kill();
+                let _ = compositor_child.wait();
+                let mut bc = bus_child;
+                let _ = bc.kill();
+                let _ = bc.wait();
+                let mut bk = portal_backend_child;
+                let _ = bk.kill();
+                let _ = bk.wait();
+                return Err(anyhow::Error::from(e).context(
+                    "failed to spawn /usr/libexec/xdg-desktop-portal (install `xdg-desktop-portal`)",
+                ));
+            }
+        };
+
+        if let Err(e) = wait_for_portal(&bus_addr, &xdg_runtime_dir, Duration::from_secs(5)) {
+            let _ = compositor_child.kill();
+            let _ = compositor_child.wait();
+            let mut bc = bus_child;
+            let _ = bc.kill();
+            let _ = bc.wait();
+            let mut bk = portal_backend_child;
+            let _ = bk.kill();
+            let _ = bk.wait();
+            let mut pc = portal_child;
+            let _ = pc.kill();
+            let _ = pc.wait();
+            return Err(e.context("xdg-desktop-portal did not register on session bus"));
+        }
+        info!("xdg-desktop-portal registered on session bus");
+
+        Ok(WaylandDisplay {
+            display_num,
+            compositor_child,
+            bus_child,
+            portal_backend_child,
+            portal_child,
+            desktop_child: None,
+            pulse_child: None,
+            xdg_runtime_dir,
+            wayland_display,
+            output_name,
+        })
     }
 
     /// Reusable env builder so `start_desktop` / `start_pulseaudio` use the
@@ -341,6 +533,13 @@ impl Drop for WaylandDisplay {
         if let Some(mut c) = self.pulse_child.take() {
             stop(&mut c, "wayland-pulseaudio", self.display_num);
         }
+        stop(&mut self.portal_child, "wayland-portal", self.display_num);
+        stop(
+            &mut self.portal_backend_child,
+            "wayland-portal-wlr",
+            self.display_num,
+        );
+        stop(&mut self.bus_child, "wayland-dbus", self.display_num);
         stop(
             &mut self.compositor_child,
             "wayland-compositor",
@@ -357,4 +556,86 @@ impl Drop for WaylandDisplay {
             );
         }
     }
+}
+
+/// Real uid for the agent process. We only call this on Unix; libc returns
+/// the kernel uid directly. Used to locate the user's PipeWire socket.
+#[cfg(unix)]
+fn real_uid() -> Option<u32> {
+    // SAFETY: getuid() is signal-safe and always succeeds.
+    Some(unsafe { libc::getuid() })
+}
+
+/// Find a `wayland-*` socket inside `dir`. Returns the socket file name
+/// (e.g. `"wayland-0"`) or `Ok(None)` if none has appeared yet.
+fn scan_for_wayland_socket(dir: &std::path::Path) -> anyhow::Result<Option<String>> {
+    use std::os::unix::fs::FileTypeExt;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if !name_str.starts_with("wayland-") || name_str.ends_with(".lock") {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata()
+            && meta.file_type().is_socket()
+        {
+            return Ok(Some(name_str.into_owned()));
+        }
+    }
+    Ok(None)
+}
+
+/// Poll for a unix socket path to appear, up to `timeout`.
+fn wait_for_socket(path: &std::path::Path, timeout: Duration) -> anyhow::Result<()> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if path.exists() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    anyhow::bail!(
+        "socket {} did not appear within {:?}",
+        path.display(),
+        timeout
+    )
+}
+
+/// Probe the session bus for the xdg-desktop-portal name, up to `timeout`.
+///
+/// Uses `gdbus introspect` against the portal object path. Once the portal
+/// has registered its bus name, introspection succeeds immediately. We
+/// don't actually need the introspection output — only the exit code.
+fn wait_for_portal(
+    bus_addr: &str,
+    xdg_runtime_dir: &std::path::Path,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let status = Command::new("gdbus")
+            .args([
+                "introspect",
+                "--session",
+                "--dest=org.freedesktop.portal.Desktop",
+                "--object-path=/org/freedesktop/portal/desktop",
+            ])
+            .env("DBUS_SESSION_BUS_ADDRESS", bus_addr)
+            .env("XDG_RUNTIME_DIR", xdg_runtime_dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if let Ok(s) = status
+            && s.success()
+        {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    anyhow::bail!("org.freedesktop.portal.Desktop did not appear on {bus_addr} within {timeout:?}")
 }
