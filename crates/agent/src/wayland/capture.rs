@@ -50,12 +50,7 @@
 //! Set BEAM_WAYLAND_LATENCY_MEASURE=1 to log per-frame PTS deltas (encoder
 //! input latency proxy).  Off by default; zero overhead when off.
 //!
-//! **Wiring status**: this implementation is complete but `main.rs` does not
-//! yet dispatch to it (the dispatch still calls the simpler
-//! `wayland::compositor::WaylandDisplay::start` stub). Once `main.rs` learns
-//! to construct a `WaylandCapture` instead of (or alongside) the existing
-//! Xorg `XorgCapture`, drop the module-level `#[allow(dead_code)]` below.
-#![allow(dead_code)]
+//! **Wiring status**: wired via `run_wayland_session` in `main.rs`.
 
 use crate::capture::{PooledFrame, ScreenCaptureBackend};
 use crate::encoder::{EncoderType, build_h264_pipeline_from_src};
@@ -83,7 +78,7 @@ pub struct WaylandCapture {
     pipeline_error: Arc<AtomicBool>,
     width: u32,
     height: u32,
-    latency: Arc<LatencyMeter>,
+    _latency: Arc<LatencyMeter>,
     /// Keeps the portal session alive.  Dropping closes the screencast stream.
     _portal_session: PortalSession,
 }
@@ -224,7 +219,10 @@ impl WaylandCapture {
             .set_state(gst::State::Playing)
             .context("Failed to start Wayland pipeline")?;
 
-        info!(node_id, width, height, framerate, bitrate, "WaylandCapture pipeline started");
+        info!(
+            node_id,
+            width, height, framerate, bitrate, "WaylandCapture pipeline started"
+        );
 
         Ok(Self {
             pipeline,
@@ -233,7 +231,7 @@ impl WaylandCapture {
             pipeline_error,
             width,
             height,
-            latency,
+            _latency: latency,
             _portal_session: portal_session,
         })
     }
@@ -266,11 +264,6 @@ impl WaylandCapture {
             src.send_event(event);
             info!("Forced IDR keyframe (WaylandCapture)");
         }
-    }
-
-    /// Access the latency meter for diagnostic logging.
-    pub fn latency_meter(&self) -> &LatencyMeter {
-        &self.latency
     }
 }
 
@@ -374,8 +367,8 @@ fn open_portal_session(
     .context("CreateSession gdbus call failed")?;
     debug!(output = %create_out, "CreateSession output");
 
-    let create_req_path = parse_object_path(&create_out)
-        .context("Failed to parse CreateSession request path")?;
+    let create_req_path =
+        parse_object_path(&create_out).context("Failed to parse CreateSession request path")?;
     let session_handle = gdbus_wait_response(
         xdg_runtime_dir,
         wayland_display,
@@ -404,8 +397,8 @@ fn open_portal_session(
         ),
     )
     .context("SelectSources gdbus call failed")?;
-    let sel_req_path = parse_object_path(&sel_out)
-        .context("Failed to parse SelectSources request path")?;
+    let sel_req_path =
+        parse_object_path(&sel_out).context("Failed to parse SelectSources request path")?;
     gdbus_wait_response(
         xdg_runtime_dir,
         wayland_display,
@@ -430,8 +423,8 @@ fn open_portal_session(
         ),
     )
     .context("Start gdbus call failed")?;
-    let start_req_path = parse_object_path(&start_out)
-        .context("Failed to parse Start request path")?;
+    let start_req_path =
+        parse_object_path(&start_out).context("Failed to parse Start request path")?;
     let streams_raw = gdbus_wait_response(
         xdg_runtime_dir,
         wayland_display,
@@ -504,7 +497,10 @@ fn gdbus_wait_response(
         .spawn()
         .context("Failed to spawn gdbus monitor")?;
 
-    let stdout = child.stdout.take().context("No stdout from gdbus monitor")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("No stdout from gdbus monitor")?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
 
     use std::io::{BufRead, BufReader};
@@ -649,7 +645,12 @@ fn build_wayland_pipeline(
     // Downstream H.264 chain from the shared helper in encoder.rs.
     let (encoder_elem, profile_capsfilter, parser, parse_capsfilter, appsink) =
         build_h264_pipeline_from_src(
-            encoder_type, encoder_name, width, height, framerate, bitrate,
+            encoder_type,
+            encoder_name,
+            width,
+            height,
+            framerate,
+            bitrate,
         )
         .context("Failed to build H.264 downstream chain")?;
 

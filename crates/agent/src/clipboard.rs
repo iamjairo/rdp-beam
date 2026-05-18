@@ -7,6 +7,16 @@ pub struct ClipboardBridge {
 }
 
 impl ClipboardBridge {
+    /// Construct a bridge that silently no-ops all operations. Used when
+    /// xclip is unavailable (e.g. on a headless Wayland session without
+    /// Xwayland). `get_text` returns `Ok(None)` and `set_text` returns `Ok(())`.
+    #[cfg(feature = "wayland")]
+    pub fn noop() -> Self {
+        Self {
+            x_display: String::new(),
+        }
+    }
+
     pub fn new(x_display: &str) -> anyhow::Result<Self> {
         // Verify xclip is available
         Command::new("which")

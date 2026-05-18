@@ -30,21 +30,7 @@ mod capture;
 mod compositor;
 mod input;
 
-// Re-exports of the four backend impls. Audio/Capture/Input aren't
-// referenced anywhere yet — packets A3/A4/A5 wire them up. Suppress the
-// unused-import warning until then; the `pub use` lines are the public
-// API surface this module commits to.
-#[allow(unused_imports)]
 pub use audio::WaylandAudio;
-#[allow(unused_imports)]
 pub use capture::WaylandCapture;
 pub use compositor::{WaylandDisplay, WaylandDisplayConfig};
-#[allow(unused_imports)]
 pub use input::WaylandInput;
-
-/// Shared "not yet implemented" message. Each submodule that still stubs a
-/// trait method references this so the workaround text stays in one place.
-#[allow(dead_code)]
-pub(crate) const NOT_YET: &str = "Wayland backend is not yet implemented. \
-     Set `[session] backend = \"xorg\"` in /etc/beam/beam.toml as a workaround. \
-     Tracking issue: https://github.com/frecar/beam/issues (wayland backend)";

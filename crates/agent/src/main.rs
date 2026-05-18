@@ -50,7 +50,7 @@ pub(crate) enum CaptureCommand {
 
 /// Shared context for building the input event callback.
 struct InputCallbackCtx {
-    injector: Arc<Mutex<XorgInput>>,
+    injector: Arc<Mutex<dyn input::InputBackend>>,
     clipboard: Arc<Mutex<ClipboardBridge>>,
     file_transfer: Arc<Mutex<filetransfer::FileTransferManager>>,
     resize_tx: mpsc::Sender<(u32, u32)>,
@@ -345,27 +345,14 @@ async fn main() -> anyhow::Result<()> {
         "Starting beam-agent"
     );
 
-    // Validate backend and fail fast for unimplemented paths.
-    // The Wayland runtime path is not yet wired up; bail with a clear message
-    // rather than silently degrading to Xorg, which would hide a
-    // misconfiguration on a 26.04 host.
     match args.backend.as_str() {
         "xorg" => {} // continue below
         "wayland" => {
-            #[cfg(feature = "wayland")]
-            {
-                // Delegate to the Wayland stub — it bails with the same message.
-                wayland::WaylandDisplay::start(wayland::WaylandDisplayConfig {
-                    display_num: 0,
-                    width: 0,
-                    height: 0,
-                })?;
-            }
             #[cfg(not(feature = "wayland"))]
             anyhow::bail!(
-                "backend = \"wayland\" is not yet implemented in beam-agent. \
-                 Set `[session] backend = \"xorg\"` in /etc/beam/beam.toml as a workaround. \
-                 Tracking issue: https://github.com/frecar/beam/issues (wayland backend)"
+                "backend = \"wayland\" requires the `wayland` Cargo feature. \
+                 Rebuild with `--features wayland` or set `[session] backend = \"xorg\"` \
+                 in /etc/beam/beam.toml."
             );
         }
         other => {
@@ -374,6 +361,11 @@ async fn main() -> anyhow::Result<()> {
                 other
             );
         }
+    }
+
+    #[cfg(feature = "wayland")]
+    if args.backend == "wayland" {
+        return run_wayland_session(args).await;
     }
 
     // PulseAudio server path — derived from display number regardless of new/existing display
@@ -497,7 +489,7 @@ async fn main() -> anyhow::Result<()> {
     // Create input injector (uses XTEST extension -- no uinput needed)
     let input_width = Arc::new(std::sync::atomic::AtomicU32::new(args.width));
     let input_height = Arc::new(std::sync::atomic::AtomicU32::new(args.height));
-    let injector = Arc::new(Mutex::new(
+    let injector: Arc<Mutex<dyn input::InputBackend>> = Arc::new(Mutex::new(
         XorgInput::new(
             &args.display,
             Arc::clone(&input_width),
@@ -1098,5 +1090,444 @@ async fn main() -> anyhow::Result<()> {
     }
 
     info!("Agent shutdown complete");
+    Ok(())
+}
+
+/// Full Wayland session: compositor → capture → input → audio → signaling.
+///
+/// Mirrors the Xorg path in `main` but uses `WaylandDisplay`, `WaylandCapture`,
+/// `WaylandInput`, and `WaylandAudio` instead of their Xorg counterparts.
+/// `WaylandCapture` encodes internally (Architecture A), so there is no
+/// separate `Encoder` in this path.
+#[cfg(feature = "wayland")]
+async fn run_wayland_session(args: cli::Args) -> anyhow::Result<()> {
+    use audio::AudioBackend as _;
+    use display::DisplayBackend as _;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    let display_num: u32 = args.display.trim_start_matches(':').parse().unwrap_or(10);
+
+    // Start headless Wayland compositor (cage / sway --backend=headless).
+    let mut virtual_display = wayland::WaylandDisplay::start(wayland::WaylandDisplayConfig {
+        display_num,
+        width: args.width,
+        height: args.height,
+    })
+    .context("Failed to start Wayland compositor")?;
+
+    // Start PulseAudio bound to this session's XDG_RUNTIME_DIR.
+    if let Err(e) = virtual_display.start_pulseaudio() {
+        warn!("Failed to start PulseAudio for Wayland session: {e:#}");
+    }
+
+    // Start desktop session.
+    if let Err(e) = virtual_display.start_desktop() {
+        warn!("Failed to start desktop on Wayland compositor: {e:#}");
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let wayland_display = virtual_display.wayland_display().to_string();
+    let xdg_runtime_dir = virtual_display.xdg_runtime_dir().to_string();
+
+    // Detect encoder preference before opening capture (same cap logic as Xorg).
+    let encoder_pref = args.encoder.clone();
+    let (encoder_type, _) = encoder::detect_encoder_type(args.encoder.as_deref())?;
+    let config_framerate;
+    let config_bitrate;
+    if matches!(encoder_type, encoder::EncoderType::Software) && args.framerate > 60 {
+        config_framerate = 60;
+        config_bitrate = args.bitrate.min(20_000);
+        warn!(
+            requested_fps = args.framerate,
+            capped_fps = config_framerate,
+            capped_bitrate = config_bitrate,
+            "Software encoder: capping framerate to 60fps and bitrate to 20Mbps"
+        );
+    } else {
+        config_framerate = args.framerate;
+        config_bitrate = args.bitrate;
+    }
+
+    // Open PipeWire screencast capture + H.264 encode pipeline.
+    let wayland_capture = wayland::WaylandCapture::new(
+        &wayland_display,
+        &xdg_runtime_dir,
+        args.width,
+        args.height,
+        config_framerate,
+        config_bitrate,
+        encoder_pref.as_deref(),
+    )
+    .context("Failed to open WaylandCapture pipeline")?;
+
+    let cap_width = wayland_capture.width();
+    let cap_height = wayland_capture.height();
+
+    // Channels — same shapes as the Xorg path.
+    let (encoded_tx, mut encoded_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(2);
+    let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+    let _audio_tx_keepalive = audio_tx.clone();
+    let (ws_outbox_tx, mut ws_outbox_rx) =
+        tokio::sync::mpsc::channel::<tokio_tungstenite::tungstenite::Message>(32);
+
+    let session_id = args.session_id;
+
+    // Width/height atomics — initialised from capture dimensions.
+    let input_width = Arc::new(std::sync::atomic::AtomicU32::new(cap_width));
+    let input_height = Arc::new(std::sync::atomic::AtomicU32::new(cap_height));
+
+    // Wayland input injector.
+    let injector: Arc<std::sync::Mutex<dyn input::InputBackend>> = Arc::new(std::sync::Mutex::new(
+        wayland::WaylandInput::new(
+            &wayland_display,
+            Arc::clone(&input_width),
+            Arc::clone(&input_height),
+        )
+        .context("Failed to create WaylandInput")?,
+    ));
+
+    // Clipboard bridge (X11 — via Xwayland; best-effort on pure Wayland).
+    let clipboard = Arc::new(std::sync::Mutex::new(
+        clipboard::ClipboardBridge::new(&args.display).unwrap_or_else(|e| {
+            warn!("Clipboard bridge unavailable on Wayland session: {e:#}");
+            clipboard::ClipboardBridge::noop()
+        }),
+    ));
+
+    let force_keyframe = Arc::new(AtomicBool::new(false));
+    let video_needs_keyframe = Arc::new(AtomicBool::new(false));
+    let (capture_cmd_tx, _capture_cmd_rx) = std::sync::mpsc::channel::<CaptureCommand>();
+    let (resize_tx, mut resize_rx) = tokio::sync::mpsc::channel::<(u32, u32)>(4);
+    let last_input_time = Arc::new(AtomicU64::new(0));
+    let capture_wake = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let (clipboard_read_tx, mut clipboard_read_rx) = tokio::sync::mpsc::channel::<()>(4);
+    let (download_request_tx, mut download_request_rx) = tokio::sync::mpsc::channel::<String>(4);
+    let tab_backgrounded = Arc::new(AtomicBool::new(false));
+
+    let home_dir = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+    let file_transfer = Arc::new(std::sync::Mutex::new(
+        filetransfer::FileTransferManager::new(home_dir),
+    ));
+    let file_transfer_for_download = Arc::clone(&file_transfer);
+
+    let input_callback = build_input_callback(InputCallbackCtx {
+        injector: Arc::clone(&injector),
+        clipboard: Arc::clone(&clipboard),
+        file_transfer,
+        resize_tx: resize_tx.clone(),
+        last_input_time: Arc::clone(&last_input_time),
+        clipboard_read_tx: clipboard_read_tx.clone(),
+        download_request_tx,
+        capture_wake: Arc::clone(&capture_wake),
+        capture_cmd_tx: capture_cmd_tx.clone(),
+        tab_backgrounded: Arc::clone(&tab_backgrounded),
+        video_needs_keyframe: Arc::clone(&video_needs_keyframe),
+        display: wayland_display.clone(),
+        max_width: args.max_width,
+        max_height: args.max_height,
+    });
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_for_capture = Arc::clone(&shutdown);
+    let shutdown_for_audio = Arc::clone(&shutdown);
+
+    // Wayland capture thread: pull pre-encoded frames from WaylandCapture pipeline.
+    let kf_flag_for_capture = Arc::clone(&force_keyframe);
+    let tab_backgrounded_for_capture = Arc::clone(&tab_backgrounded);
+    let last_input_for_capture = Arc::clone(&last_input_time);
+    let capture_wake_for_thread = Arc::clone(&capture_wake);
+    let input_width_for_capture = Arc::clone(&input_width);
+    let input_height_for_capture = Arc::clone(&input_height);
+
+    const IDLE_TIMEOUT_MS: u64 = 300_000;
+    const IDLE_FRAMERATE: u32 = 5;
+    const BACKGROUND_FRAMERATE: u32 = 1;
+    let active_frame_duration_ns = 1_000_000_000u64 / config_framerate as u64;
+    let idle_frame_duration_ns = 1_000_000_000u64 / IDLE_FRAMERATE as u64;
+    let background_frame_duration_ns = 1_000_000_000u64 / BACKGROUND_FRAMERATE as u64;
+
+    let capture_handle = std::thread::Builder::new()
+        .name("wayland-capture".into())
+        .spawn(move || {
+            #[cfg(target_os = "linux")]
+            {
+                let param = libc::sched_param { sched_priority: 50 };
+                let ret = unsafe { libc::sched_setscheduler(0, libc::SCHED_FIFO, &param) };
+                if ret != 0 {
+                    warn!(
+                        "Could not set SCHED_FIFO (need CAP_SYS_NICE): {}",
+                        std::io::Error::last_os_error()
+                    );
+                } else {
+                    info!("Wayland capture thread elevated to SCHED_FIFO priority 50");
+                }
+            }
+
+            let mut was_idle = false;
+            let mut was_backgrounded = false;
+            let mut first_frame_logged = false;
+            let mut frame_count: u64 = 0;
+            let start = std::time::Instant::now();
+            let mut last_heartbeat = std::time::Instant::now();
+
+            loop {
+                if shutdown_for_capture.load(Ordering::Relaxed) {
+                    info!("Wayland capture thread shutting down");
+                    break;
+                }
+
+                if wayland_capture.has_error() {
+                    error!("WaylandCapture pipeline error — stopping capture thread");
+                    break;
+                }
+
+                if kf_flag_for_capture.swap(false, Ordering::Relaxed) {
+                    wayland_capture.force_keyframe();
+                }
+
+                let frame_start = std::time::Instant::now();
+                let is_backgrounded = tab_backgrounded_for_capture.load(Ordering::Relaxed);
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let last_input_ms = last_input_for_capture.load(Ordering::Relaxed);
+                let is_idle = last_input_ms > 0 && (now_ms - last_input_ms) > IDLE_TIMEOUT_MS;
+
+                let frame_duration_ns = if is_backgrounded {
+                    background_frame_duration_ns
+                } else if is_idle {
+                    idle_frame_duration_ns
+                } else {
+                    active_frame_duration_ns
+                };
+
+                if is_backgrounded != was_backgrounded {
+                    was_backgrounded = is_backgrounded;
+                }
+                if is_idle != was_idle && !is_backgrounded {
+                    was_idle = is_idle;
+                }
+
+                match wayland_capture.pull_encoded() {
+                    Ok(Some(data)) => {
+                        frame_count += 1;
+                        if !first_frame_logged {
+                            info!(size = data.len(), "First H.264 frame from WaylandCapture");
+                            first_frame_logged = true;
+                        }
+                        match encoded_tx.try_send(data) {
+                            Ok(()) => {}
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                debug!("Dropping Wayland encoded frame (channel full)");
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                info!("Encoded channel closed, stopping Wayland capture");
+                                return;
+                            }
+                        }
+                        // Update input dimensions from capture if they changed.
+                        let new_w = wayland_capture.width();
+                        let new_h = wayland_capture.height();
+                        input_width_for_capture.store(new_w, Ordering::Relaxed);
+                        input_height_for_capture.store(new_h, Ordering::Relaxed);
+                    }
+                    Ok(None) => {
+                        // Pipeline hasn't produced a frame yet; spin briefly.
+                        std::hint::spin_loop();
+                    }
+                    Err(e) => {
+                        error!("WaylandCapture pull_encoded error: {e:#}");
+                        break;
+                    }
+                }
+
+                if last_heartbeat.elapsed() >= std::time::Duration::from_secs(5) {
+                    let elapsed = start.elapsed().as_secs_f64();
+                    info!(
+                        captured = frame_count,
+                        fps = format!("{:.1}", frame_count as f64 / elapsed),
+                        is_idle,
+                        is_backgrounded,
+                        "Wayland capture heartbeat"
+                    );
+                    last_heartbeat = std::time::Instant::now();
+                }
+
+                // Frame pacing — idle/background sleep; active spin-wait.
+                let target = std::time::Duration::from_nanos(frame_duration_ns);
+                let elapsed = frame_start.elapsed();
+                if elapsed < target {
+                    let remaining = target - elapsed;
+                    if is_idle || is_backgrounded {
+                        let (lock, cvar) = &*capture_wake_for_thread;
+                        let mut woken = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        *woken = false;
+                        let result = cvar
+                            .wait_timeout(woken, remaining)
+                            .unwrap_or_else(|e| e.into_inner());
+                        if *result.0 {
+                            debug!("Wayland capture thread woken by input");
+                        }
+                    } else {
+                        if remaining > std::time::Duration::from_millis(2) {
+                            std::thread::sleep(remaining - std::time::Duration::from_millis(1));
+                        }
+                        while frame_start.elapsed() < target {
+                            std::hint::spin_loop();
+                        }
+                    }
+                }
+            }
+        })
+        .context("Failed to spawn Wayland capture thread")?;
+
+    // Wayland audio thread: PipeWire-native (replaces XorgAudio/libpulse).
+    let xdg_for_audio = xdg_runtime_dir.clone();
+    let audio_handle = std::thread::Builder::new()
+        .name("wayland-audio".into())
+        .spawn(move || {
+            let mut attempt = 0u32;
+            let audio_capture = loop {
+                if shutdown_for_audio.load(Ordering::Relaxed) {
+                    return;
+                }
+                match wayland::WaylandAudio::new(&xdg_for_audio, 48000, 2) {
+                    Ok(c) => break c,
+                    Err(e) => {
+                        let delay = if attempt < 20 { 500 } else { 2000 };
+                        if attempt < 5 || attempt.is_multiple_of(10) {
+                            info!(
+                                attempt = attempt + 1,
+                                delay_ms = delay,
+                                "WaylandAudio not ready, retrying: {e:#}"
+                            );
+                        }
+                        if attempt > 60 {
+                            warn!("WaylandAudio unavailable after 60 attempts: {e:#}. Giving up.");
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(delay));
+                        attempt += 1;
+                    }
+                }
+            };
+            let mut audio_capture = audio_capture;
+            audio_capture.flush();
+            info!("Wayland audio capture thread started");
+            loop {
+                if shutdown_for_audio.load(Ordering::Relaxed) {
+                    info!("Wayland audio thread shutting down");
+                    return;
+                }
+                if audio_capture.has_error() {
+                    error!("WaylandAudio pipeline error — stopping audio thread");
+                    return;
+                }
+                match audio_capture.capture_and_encode() {
+                    Ok(opus_data) => {
+                        if opus_data.is_empty() {
+                            continue; // no frame ready yet
+                        }
+                        if audio_tx.blocking_send(opus_data).is_err() {
+                            info!("Audio channel closed, stopping Wayland audio capture");
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        error!("Wayland audio capture error: {e:#}");
+                        return;
+                    }
+                }
+            }
+        })
+        .context("Failed to spawn Wayland audio thread")?;
+    let audio_handle = Some(audio_handle);
+
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
+    let server_url = args.server_url.clone();
+    let kf_flag_for_signal = Arc::clone(&force_keyframe);
+    let cmd_tx_for_signal = capture_cmd_tx.clone();
+    let cmd_tx_for_video = capture_cmd_tx.clone();
+    let cmd_tx_for_resize = capture_cmd_tx;
+    let clipboard_for_sync = Arc::clone(&clipboard);
+
+    let signaling_ctx = signaling::SignalingCtx {
+        server_url: &server_url,
+        session_id,
+        agent_token: args.agent_token.as_deref(),
+        tls_cert_path: args.tls_cert_path.as_deref(),
+        force_keyframe: kf_flag_for_signal,
+        input_callback: Arc::clone(&input_callback),
+        capture_cmd_tx: &cmd_tx_for_signal,
+        tab_backgrounded: Arc::clone(&tab_backgrounded),
+    };
+
+    tokio::select! {
+        _ = video::run_video_send_loop(
+            &mut encoded_rx,
+            &ws_outbox_tx,
+            &force_keyframe,
+            &video_needs_keyframe,
+            &cmd_tx_for_video,
+            &input_width,
+            &input_height,
+        ) => {}
+
+        _ = video::run_audio_send_loop(
+            &mut audio_rx,
+            &ws_outbox_tx,
+        ) => {}
+
+        _ = signaling::run_signaling(
+            &signaling_ctx,
+            &mut ws_outbox_rx,
+        ) => {}
+
+        _ = async {
+            while let Some((w, h)) = resize_rx.recv().await {
+                info!(w, h, "Wayland resize requested (forwarded; xrandr not available)");
+                let _ = cmd_tx_for_resize.send(CaptureCommand::Resize { width: w, height: h });
+            }
+        } => {}
+
+        _ = clipboard_sync::run_clipboard_sync(
+            &mut clipboard_read_rx,
+            &clipboard_for_sync,
+            &ws_outbox_tx,
+        ) => {}
+
+        _ = file_transfer_task::run_file_download_loop(
+            &mut download_request_rx,
+            &file_transfer_for_download,
+            &ws_outbox_tx,
+        ) => {}
+
+        _ = std::future::pending::<()>() => {}
+
+        _ = tokio::signal::ctrl_c() => {
+            info!("Received SIGINT, shutting down Wayland session");
+        }
+        _ = sigterm.recv() => {
+            info!("Received SIGTERM, shutting down Wayland session");
+        }
+    }
+
+    shutdown.store(true, Ordering::Relaxed);
+    drop(encoded_rx);
+    drop(audio_rx);
+    if let Err(e) = capture_handle.join() {
+        warn!("Wayland capture thread panicked: {e:?}");
+    }
+    if let Some(handle) = audio_handle
+        && let Err(e) = handle.join()
+    {
+        warn!("Wayland audio thread panicked: {e:?}");
+    }
+    drop(virtual_display);
+    info!("Wayland agent shutdown complete");
     Ok(())
 }

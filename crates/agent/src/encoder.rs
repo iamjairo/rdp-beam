@@ -500,11 +500,11 @@ pub fn build_h264_pipeline_from_src(
     framerate: u32,
     bitrate: u32,
 ) -> anyhow::Result<(
-    gst::Element,     // encoder
-    gst::Element,     // profile capsfilter
-    gst::Element,     // h264parse
-    gst::Element,     // parse_capsfilter (byte-stream, au)
-    AppSink,          // appsink (name="sink")
+    gst::Element, // encoder
+    gst::Element, // profile capsfilter
+    gst::Element, // h264parse
+    gst::Element, // parse_capsfilter (byte-stream, au)
+    AppSink,      // appsink (name="sink")
 )> {
     let encoder = build_encoder_element(encoder_type, encoder_name, bitrate, framerate)
         .with_context(|| format!("Failed to create encoder element '{encoder_name}'"))?;
@@ -552,7 +552,13 @@ pub fn build_h264_pipeline_from_src(
     // automatically through GStreamer's pad negotiation.
     let _ = (width, height); // suppress unused warning if logging is stripped
 
-    Ok((encoder, profile_capsfilter, parser, parse_capsfilter, appsink))
+    Ok((
+        encoder,
+        profile_capsfilter,
+        parser,
+        parse_capsfilter,
+        appsink,
+    ))
 }
 
 #[cfg(test)]

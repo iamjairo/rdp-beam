@@ -57,6 +57,7 @@ x11rb = { version = "0.13.2", features = ["shm", "randr", "xfixes", "xtest", "al
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
 # D-Bus for xdg-desktop-portal ScreenCast session negotiation (Wayland only).
 # blocking feature avoids pulling in async runtime — the portal handshake is
 # one-shot at startup, not on the hot path.

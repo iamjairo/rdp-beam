@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Beam remote desktop per-user agent"
 
+[lib]
+name = "beam_agent"
+path = "src/lib.rs"
+
 [[bin]]
 name = "beam-agent"
 path = "src/main.rs"
@@ -18,6 +22,7 @@ wayland = [
     "dep:wayland-client",
     "dep:wayland-protocols",
     "dep:wayland-protocols-wlr",
+    "dep:wayland-protocols-misc",
     # NOTE: `zbus` is intentionally not in this list. The scaffolded
     # PipeWire portal handshake in `wayland/wip/capture-a3-pipewiresrc.rs`
     # uses it, but until that lands in the active capture.rs path, leaving
@@ -57,6 +62,7 @@ base64 = "0.22"
 wayland-client = { workspace = true, optional = true }
 wayland-protocols = { workspace = true, optional = true }
 wayland-protocols-wlr = { workspace = true, optional = true }
+wayland-protocols-misc = { workspace = true, optional = true }
 # zbus is declared in workspace.dependencies for future use by the
 # scaffolded portal handshake in wayland/wip/, but not pulled into the
 # active wayland feature path yet (see [features] above).
